@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Аудит конфигураций Nginx и областей сетевой видимости">
+  <meta property="og:title" content="NGINX Scope">
+  <meta property="og:description" content="Аудит публикаций без слепых зон">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="{{PUBLIC_ORIGIN}}/static/og.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="NGINX Scope">
+  <meta name="twitter:description" content="Аудит публикаций без слепых зон">
+  <meta name="twitter:image" content="{{PUBLIC_ORIGIN}}/static/og.jpg">
+  <title>NGINX Scope — аудит публикаций</title>
+  <link rel="icon" type="image/jpeg" href="/static/og.jpg">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-mark">N</span><span>NGINX <b>Scope</b></span></a>
+    <div class="privacy"><span></span> Без постоянного хранения файлов</div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="eyebrow">SECURITY CONFIGURATION REVIEW</div>
+      <h1>Контроль публикаций<br>без слепых зон</h1>
+      <p>Загрузите конфигурацию Nginx и результаты датчиков периметра. Получите замечания, адреса публикации и фактические области видимости.</p>
+    </section>
+
+    <form id="audit-form" class="workspace">
+      <section class="upload-card panel">
+        <div class="step">01 · КОНФИГУРАЦИЯ</div>
+        <label class="dropzone" id="dropzone" for="nginx-config">
+          <input id="nginx-config" name="nginx_config" type="file" accept=".conf,.txt" required>
+          <span class="upload-icon">↑</span>
+          <span class="drop-copy"><strong id="config-title">Загрузите nginx.conf</strong><small id="config-meta">или вывод nginx -T · UTF-8 · до 5 МБ</small></span>
+          <span class="select-button">Выбрать файл</span>
+        </label>
+
+        <details class="visibility-files">
+          <summary><span>Добавить области видимости</span><small>inventory + результаты датчиков</small></summary>
+          <div class="file-grid">
+            <label><span>Реестр ресурсов</span><input name="inventory" type="file" accept=".json"><small>inventory.json</small></label>
+            <label><span>Внешний датчик</span><input name="external_sensor" type="file" accept=".json"><small>external/sensor.json</small></label>
+            <label><span>Внутренний датчик</span><input name="internal_sensor" type="file" accept=".json"><small>internal/sensor.json</small></label>
+          </div>
+        </details>
+
+        <button class="run" type="submit"><span id="run-label">Запустить анализ</span><span>→</span></button>
+        <p id="form-error" class="error" role="alert" hidden></p>
+      </section>
+
+      <aside class="how-card">
+        <div class="step muted">КАК ЭТО РАБОТАЕТ</div>
+        <ol>
+          <li><b>Статический анализ</b><span>Проверяем TLS, заголовки, status endpoints, autoindex и default server.</span></li>
+          <li><b>Сверка периметров</b><span>Сопоставляем фактическую доступность из external и internal зон.</span></li>
+          <li><b>Единый отчёт</b><span>Показываем приоритет, объект, адрес и отклонение от ожиданий.</span></li>
+        </ol>
+        <div class="safe-note"><b>Безопасно по умолчанию</b><span>Исходная конфигурация удаляется после запроса и не включается в отчёт.</span></div>
+      </aside>
+    </form>
+
+    <section id="report" class="report panel" hidden>
+      <div class="report-head">
+        <div><div class="step">02 · РЕЗУЛЬТАТ</div><h2>Отчёт о публикациях</h2><p id="generated-at"></p></div>
+        <div class="report-actions"><button id="export-csv" type="button">CSV</button><button id="export-json" type="button">JSON</button></div>
+      </div>
+
+      <div class="summary-strip">
+        <div class="score"><strong id="score">—</strong><span>/100</span><small id="score-label">Оценка конфигурации</small></div>
+        <div class="metric critical"><b id="count-critical">0</b><span>Критических</span></div>
+        <div class="metric high"><b id="count-high">0</b><span>Высоких</span></div>
+        <div class="metric medium"><b id="count-medium">0</b><span>Средних</span></div>
+        <div class="metric low"><b id="count-low">0</b><span>Низких</span></div>
+      </div>
+
+      <nav class="tabs" aria-label="Разделы отчёта">
+        <button class="active" type="button" data-tab="findings">Замечания <span id="findings-total">0</span></button>
+        <button type="button" data-tab="visibility">Области видимости <span id="resources-total">0</span></button>
+      </nav>
+
+      <div id="findings-panel" class="tab-panel">
+        <div class="table-wrap"><table><thead><tr><th>Уровень</th><th>Замечание</th><th>Объект</th><th>Свидетельство</th></tr></thead><tbody id="findings-body"></tbody></table></div>
+        <div id="findings-empty" class="empty" hidden><b>Замечаний не найдено</b><span>Проверенные правила не выявили отклонений.</span></div>
+      </div>
+
+      <div id="visibility-panel" class="tab-panel" hidden>
+        <div class="table-wrap"><table><thead><tr><th>Ресурс</th><th>Ожидалось</th><th>Фактически</th><th>Адреса</th><th>Статус</th></tr></thead><tbody id="visibility-body"></tbody></table></div>
+        <div id="visibility-empty" class="empty" hidden><b>Нет данных о периметрах</b><span>Добавьте inventory.json и отчёты внешнего/внутреннего датчиков.</span></div>
+      </div>
+    </section>
+  </main>
+  <footer><span>NGINX Scope</span><span>Конфигурационный аудит · версия 1.0</span></footer>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

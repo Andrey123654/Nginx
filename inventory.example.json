@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "max_sensor_age_hours": 12,
+  "targets": [
+    {
+      "id": "portal-public",
+      "name": "Публичный портал",
+      "owner": "web-platform@example.invalid",
+      "criticality": "high",
+      "urls": ["https://portal.example.invalid/"],
+      "expected_visibility": ["external", "internal"],
+      "expected_cidrs": {
+        "external": ["203.0.113.0/24"],
+        "internal": ["10.20.0.0/16"]
+      }
+    },
+    {
+      "id": "admin-internal",
+      "name": "Панель администрирования",
+      "owner": "platform@example.invalid",
+      "criticality": "critical",
+      "urls": ["https://admin.corp.example.invalid/"],
+      "expected_visibility": ["internal"],
+      "expected_cidrs": {
+        "internal": ["10.30.0.0/16"]
+      }
+    }
+  ]
+}
+

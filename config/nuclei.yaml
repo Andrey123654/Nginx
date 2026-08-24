@@ -1,0 +1,14 @@
+# Профиль предназначен для регулярного production-аудита, а не пентеста.
+rate-limit: 5
+bulk-size: 2
+concurrency: 2
+timeout: 8
+retries: 1
+max-host-error: 3
+follow-redirects: true
+max-redirects: 3
+disable-update-check: true
+exclude-tags: dos,fuzz,bruteforce,intrusive,headless
+tags: misconfig,exposure,ssl,http
+severity: info,low,medium,high,critical
+

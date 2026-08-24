@@ -1,0 +1,64 @@
+# Развёртывание на Ubuntu Server 26.04 LTS
+
+Ubuntu 26.04 LTS выбрана как актуальная LTS-версия для production. Сервис не требует базы данных: загруженные конфигурации анализируются в памяти и не сохраняются.
+
+## Вариант 1: Docker Compose
+
+Требования: Ubuntu Server 26.04 LTS, Docker Engine с Compose plugin, отдельное DNS-имя и TLS-сертификат.
+
+```bash
+git clone https://github.com/Andrey123654/Nginx.git
+cd Nginx
+docker compose build --pull
+PUBLIC_ORIGIN=https://scope.example.org docker compose up -d
+curl --fail http://127.0.0.1:8080/healthz
+```
+
+Контейнер запускается без root, с read-only filesystem, без Linux capabilities и слушает только localhost хоста. Скопируйте `deploy/nginx-scope.conf.example` в `/etc/nginx/sites-available/nginx-scope`, замените домен и пути сертификатов, затем включите сайт:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/nginx-scope /etc/nginx/sites-enabled/nginx-scope
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+## Вариант 2: systemd
+
+```bash
+git clone https://github.com/Andrey123654/Nginx.git
+cd Nginx
+sudo ./deploy/install-ubuntu.sh
+curl --fail http://127.0.0.1:8080/healthz
+```
+
+Скрипт прекращает работу, если ОС отличается от Ubuntu 26.04. Он создаёт непривилегированного пользователя `nginxscope`, виртуальное окружение и hardened systemd unit. Перед production-запуском замените `PUBLIC_ORIGIN` в `/etc/systemd/system/nginx-scope.service` на реальный HTTPS origin и выполните `sudo systemctl daemon-reload && sudo systemctl restart nginx-scope`. TLS reverse proxy настраивается отдельно по примеру выше.
+
+## Обновление
+
+Для Docker:
+
+```bash
+git pull --ff-only
+docker compose build --pull
+docker compose up -d
+```
+
+Для systemd повторно запустите `sudo ./deploy/install-ubuntu.sh` после `git pull --ff-only`.
+
+## Контроль после установки
+
+```bash
+systemctl status nginx-scope --no-pager
+journalctl -u nginx-scope --since today
+curl -I https://scope.example.org/
+```
+
+Проверьте HSTS, CSP, `X-Content-Type-Options`, ограничение размера upload и rate limit. Размещайте сервис во внутреннем административном сегменте или защищайте его корпоративным SSO/WAF. Не публикуйте его анонимно в интернет.
+
+## Датчики областей видимости
+
+Команда `bin/run-sensor.sh` запускается отдельно в каждой зоне. Внешний датчик не должен использовать корпоративный DNS/VPN, внутренний — должен находиться в контролируемом внутреннем сегменте. Полученные `sensor.json` вместе с `inventory.json` загружаются в веб-интерфейс.
+
+## Резервное копирование
+
+Пользовательские файлы и отчёты сервером не сохраняются, поэтому резервируется только Git-репозиторий и локальная конфигурация reverse proxy/TLS. Экспортированный JSON-отчёт храните в утверждённом защищённом хранилище или SIEM.
