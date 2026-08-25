@@ -13,8 +13,8 @@ def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.2.2"
-    assert response.headers["x-nginx-scope-version"] == "1.2.2"
+    assert response.json()["version"] == "1.4.0"
+    assert response.headers["x-nginx-scope-version"] == "1.4.0"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -34,6 +34,7 @@ def test_analyze_returns_findings_without_echoing_config():
     assert payload["publications"][0]["server_names"] == ["(не задан)"]
     assert payload["baseline"]["kind"] == "nginx-publication-baseline"
     assert payload["publications"][0]["summary"]["text"]
+    assert payload["publications"][0]["setting_explanations"]
 
 
 def test_baseline_comparison_detects_publication_change():
@@ -48,6 +49,18 @@ def test_baseline_comparison_detects_publication_change():
     comparison = response.json()["comparison"]
     assert comparison["status"] == "changed"
     assert comparison["modified"][0]["changes"][0]["field"] == "listen"
+
+
+def test_full_pdf_export():
+    config = b"events {} http { server { listen 443 ssl; server_name app.example; location / { proxy_pass https://app; } } }"
+    report = client.post("/api/analyze", files={"nginx_config": ("nginx.conf", config, "text/plain")}).json()
+    report.pop("corrected_config", None)
+    response = client.post("/api/export/pdf", json=report)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert "nginx-scope-report.pdf" in response.headers["content-disposition"]
+    assert response.content.startswith(b"%PDF-")
+    assert len(response.content) > 5000
 
 
 def test_binary_file_is_rejected():
