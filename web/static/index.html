@@ -15,6 +15,7 @@
   <title>NGINX Scope — аудит публикаций</title>
   <link rel="icon" type="image/jpeg" href="/static/og.jpg">
   <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/publications.css">
 </head>
 <body>
   <header class="topbar">
@@ -26,7 +27,7 @@
     <section class="hero">
       <div class="eyebrow">SECURITY CONFIGURATION REVIEW</div>
       <h1>Контроль публикаций<br>без слепых зон</h1>
-      <p>Загрузите конфигурацию Nginx и результаты датчиков периметра. Получите замечания, адреса публикации и фактические области видимости.</p>
+      <p>Загрузите конфигурацию Nginx и результаты датчиков периметра. Получите отдельную карточку каждой публикации, её настройки, адреса, область видимости и изменения относительно эталона.</p>
     </section>
 
     <form id="audit-form" class="workspace">
@@ -40,11 +41,12 @@
         </label>
 
         <details class="visibility-files">
-          <summary><span>Добавить области видимости</span><small>inventory + результаты датчиков</small></summary>
+          <summary><span>Добавить данные и эталон</span><small>inventory + датчики + baseline</small></summary>
           <div class="file-grid">
             <label><span>Реестр ресурсов</span><input name="inventory" type="file" accept=".json"><small>inventory.json</small></label>
             <label><span>Внешний датчик</span><input name="external_sensor" type="file" accept=".json"><small>external/sensor.json</small></label>
             <label><span>Внутренний датчик</span><input name="internal_sensor" type="file" accept=".json"><small>internal/sensor.json</small></label>
+            <label><span>Эталон конфигурации</span><input name="baseline" type="file" accept=".json"><small>nginx-baseline.json</small></label>
           </div>
         </details>
 
@@ -66,7 +68,7 @@
     <section id="report" class="report panel" hidden>
       <div class="report-head">
         <div><div class="step">02 · РЕЗУЛЬТАТ</div><h2>Отчёт о публикациях</h2><p id="generated-at"></p></div>
-        <div class="report-actions"><button id="export-fixed" type="button">Исправленный конфиг</button><button id="export-csv" type="button">CSV</button><button id="export-json" type="button">JSON</button></div>
+        <div class="report-actions"><button id="save-baseline" type="button">Сохранить эталон</button><button id="export-fixed" type="button">Исправленный конфиг</button><button id="export-csv" type="button">CSV</button><button id="export-json" type="button">JSON</button></div>
       </div>
 
       <div class="summary-strip">
@@ -79,7 +81,9 @@
 
       <nav class="tabs" aria-label="Разделы отчёта">
         <button class="active" type="button" data-tab="findings">Замечания <span id="findings-total">0</span></button>
+        <button type="button" data-tab="publications">Публикации <span id="publications-total">0</span></button>
         <button type="button" data-tab="visibility">Области видимости <span id="resources-total">0</span></button>
+        <button type="button" data-tab="changes">Изменения <span id="changes-total">0</span></button>
       </nav>
 
       <div id="findings-panel" class="tab-panel">
@@ -87,13 +91,23 @@
         <div id="findings-empty" class="empty" hidden><b>Замечаний не найдено</b><span>Проверенные правила не выявили отклонений.</span></div>
       </div>
 
+      <div id="publications-panel" class="tab-panel" hidden>
+        <div id="publications-list" class="publications-list"></div>
+        <div id="publications-empty" class="empty" hidden><b>Публикации не найдены</b><span>В конфигурации отсутствуют блоки server.</span></div>
+      </div>
+
       <div id="visibility-panel" class="tab-panel" hidden>
         <div class="table-wrap"><table><thead><tr><th>Ресурс</th><th>Ожидалось</th><th>Фактически</th><th>Адреса</th><th>Статус</th></tr></thead><tbody id="visibility-body"></tbody></table></div>
         <div id="visibility-empty" class="empty" hidden><b>Нет данных о периметрах</b><span>Добавьте inventory.json и отчёты внешнего/внутреннего датчиков.</span></div>
       </div>
+
+      <div id="changes-panel" class="tab-panel" hidden>
+        <div id="comparison-summary" class="comparison-summary"></div>
+        <div id="changes-list" class="changes-list"></div>
+      </div>
     </section>
   </main>
-  <footer><span>NGINX Scope</span><span>Конфигурационный аудит · версия 1.1</span></footer>
+  <footer><span>NGINX Scope</span><span>Конфигурационный аудит · версия 1.2</span></footer>
   <script src="/static/app.js" defer></script>
 </body>
 </html>
