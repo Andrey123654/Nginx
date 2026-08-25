@@ -12,8 +12,8 @@ def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.0.2"
-    assert response.headers["x-nginx-scope-version"] == "1.0.2"
+    assert response.json()["version"] == "1.0.3"
+    assert response.headers["x-nginx-scope-version"] == "1.0.3"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -31,6 +31,10 @@ def test_analyze_returns_findings_without_echoing_config():
 def test_binary_file_is_rejected():
     response = client.post("/api/analyze", files={"nginx_config": ("nginx.conf", b"abc\x00def", "text/plain")})
     assert response.status_code == 415
+    detail = response.json()["detail"]
+    assert detail["code"] == "binary_file"
+    assert detail["filename"] == "nginx.conf"
+    assert detail["hint"]
 
 
 def test_extensionless_nginx_output_is_accepted():
