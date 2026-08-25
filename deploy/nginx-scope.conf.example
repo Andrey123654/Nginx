@@ -21,7 +21,8 @@ server {
     ssl_session_tickets off;
 
     server_tokens off;
-    client_max_body_size 6m;
+    # До 5 МБ для исходного конфига; PDF-запрос содержит структурированный отчёт и фрагменты публикаций.
+    client_max_body_size 16m;
     add_header Strict-Transport-Security "max-age=31536000" always;
     add_header X-Content-Type-Options nosniff always;
     add_header X-Frame-Options DENY always;
@@ -49,4 +50,3 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
-
