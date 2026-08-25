@@ -14,7 +14,7 @@ fi
 
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 apt-get update
-apt-get install -y --no-install-recommends python3 python3-venv nginx ca-certificates
+apt-get install -y --no-install-recommends python3 python3-venv nginx ca-certificates fonts-dejavu-core
 
 if ! getent group nginxscope >/dev/null; then
   addgroup --system nginxscope
