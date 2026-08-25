@@ -1,4 +1,5 @@
 import io
+import json
 
 from fastapi.testclient import TestClient
 
@@ -12,8 +13,8 @@ def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.1.0"
-    assert response.headers["x-nginx-scope-version"] == "1.1.0"
+    assert response.json()["version"] == "1.2.0"
+    assert response.headers["x-nginx-scope-version"] == "1.2.0"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -29,6 +30,23 @@ def test_analyze_returns_findings_without_echoing_config():
     assert "ssl_protocols TLSv1.2 TLSv1.3;" in payload["corrected_config"]
     assert "autoindex off;" in payload["corrected_config"]
     assert all(item.get("recommendation") for item in payload["findings"] if item["rule"].startswith("nginx-"))
+    assert len(payload["publications"]) == 1
+    assert payload["publications"][0]["server_names"] == ["(не задан)"]
+    assert payload["baseline"]["kind"] == "nginx-publication-baseline"
+
+
+def test_baseline_comparison_detects_publication_change():
+    first = b"events {} http { server { listen 443 ssl; server_name app.example; } }"
+    initial = client.post("/api/analyze", files={"nginx_config": ("nginx.conf", first, "text/plain")}).json()
+    changed = b"events {} http { server { listen 8443 ssl; server_name app.example; } }"
+    response = client.post("/api/analyze", files={
+        "nginx_config": ("nginx.conf", changed, "text/plain"),
+        "baseline": ("nginx-baseline.json", json.dumps(initial["baseline"]).encode(), "application/json"),
+    })
+    assert response.status_code == 200
+    comparison = response.json()["comparison"]
+    assert comparison["status"] == "changed"
+    assert comparison["modified"][0]["changes"][0]["field"] == "listen"
 
 
 def test_binary_file_is_rejected():
