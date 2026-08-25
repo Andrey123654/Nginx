@@ -63,6 +63,25 @@ class AuditTests(unittest.TestCase):
         self.assertTrue(applied)
         self.assertTrue(any("Content-Security-Policy" in item for item in manual))
 
+    def test_publications_have_separate_visibility_and_analytics(self):
+        config = """events {} http {
+          server { listen 0.0.0.0:80; server_name public.example; location /admin { proxy_pass http://app; } }
+          server { listen 10.2.3.4:8080; server_name internal.example; access_log off; }
+        }"""
+        publications = audit.extract_publications(config)
+        self.assertEqual(len(publications), 2)
+        self.assertEqual(publications[0]["declared_visibility"], ["external", "internal"])
+        self.assertEqual(publications[1]["declared_visibility"], ["internal"])
+        rules = {item["rule"] for item in publications[0]["findings"]}
+        self.assertIn("publication-cleartext", rules)
+        self.assertIn("publication-sensitive-endpoint-open", rules)
+
+    def test_publication_baseline_omits_raw_config(self):
+        publications = audit.extract_publications("events {} http { server { listen 80; server_name app.example; } }")
+        baseline = audit.build_publication_baseline(publications, "nginx.conf")
+        self.assertNotIn("config_excerpt", json.dumps(baseline))
+        self.assertEqual(audit.compare_publication_baseline(publications, baseline)["status"], "unchanged")
+
     def test_testssl_findings_are_normalized(self):
         sensor = self.sensor("internal", True, "10.1.2.3")
         sensor["targets"][0]["probes"][0]["url"] = "https://admin.example.invalid/"
