@@ -12,7 +12,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=MAX_UPLOAD_BYTES=5242880
 Environment=PUBLIC_ORIGIN=https://scope.example.org
-ExecStart=/opt/nginx-scope/.venv/bin/uvicorn web.app:app --host 127.0.0.1 --port 8080 --workers 2 --no-access-log --proxy-headers --forwarded-allow-ips 127.0.0.1
+ExecStart=/opt/nginx-scope/.venv/bin/uvicorn web.app:app --host 0.0.0.0 --port 8080 --workers 2 --no-access-log --proxy-headers --forwarded-allow-ips 127.0.0.1
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=20s
