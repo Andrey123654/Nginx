@@ -549,11 +549,93 @@ def _location_blocks(server_block):
             elif char == "}":
                 depth -= 1
                 if depth == 0:
+                    excerpt = server_block[match.start():index + 1].strip()
                     values.append({
                         "path": " ".join(match.group(1).split()),
-                        "config_excerpt": server_block[match.start():index + 1].strip(),
+                        "config_excerpt": excerpt,
+                        "explanation": explain_location(" ".join(match.group(1).split()), excerpt),
                     })
                     break
+    return values
+
+
+def explain_location(path, excerpt):
+    """Explain matching semantics and operational impact of one location block."""
+    if path.startswith("= "):
+        match_type = "Точное совпадение"
+        matching = "Срабатывает только для указанного URI и имеет наивысший приоритет."
+    elif path.startswith("^~ "):
+        match_type = "Приоритетный префикс"
+        matching = "Выбирается по наиболее длинному префиксу; после совпадения регулярные location не проверяются."
+    elif path.startswith("~* "):
+        match_type = "Регулярное выражение без учёта регистра"
+        matching = "Проверяется в порядке расположения среди regex-location; первое совпадение завершает поиск."
+    elif path.startswith("~ "):
+        match_type = "Регулярное выражение с учётом регистра"
+        matching = "Проверяется в порядке расположения среди regex-location; первое совпадение завершает поиск."
+    elif path.startswith("@"):
+        match_type = "Именованный внутренний маршрут"
+        matching = "Не выбирается напрямую по URI; используется внутренним перенаправлением, error_page или try_files."
+    else:
+        match_type = "Префиксный маршрут"
+        matching = "Nginx запоминает наиболее длинный подходящий префикс, затем может проверить regex-location."
+
+    directive_help = {
+        "proxy_pass": ("Передача в reverse proxy", "Определяет upstream. Наличие URI и завершающего / меняет преобразование исходного URI."),
+        "fastcgi_pass": ("Передача в FastCGI", "Направляет запрос FastCGI-приложению, часто PHP-FPM; критичны fastcgi_param и проверка существования файла."),
+        "uwsgi_pass": ("Передача в uWSGI", "Направляет запрос uWSGI-приложению и определяет сетевую связь публикации."),
+        "root": ("Корень файлов", "Путь к файлу строится добавлением URI к указанному каталогу."),
+        "alias": ("Подмена файлового пути", "Заменяет совпавшую часть location; несогласованные завершающие / могут открыть неверный каталог."),
+        "try_files": ("Выбор файла или fallback", "Последовательно проверяет файлы и выполняет внутреннее перенаправление на последний вариант."),
+        "return": ("Немедленный ответ", "Сразу возвращает код, текст или redirect и прекращает обычную обработку запроса."),
+        "rewrite": ("Изменение URI", "Переписывает URI или выполняет redirect; может запустить повторный поиск location."),
+        "auth_basic": ("Basic-аутентификация", "Запрашивает логин и пароль; безопасна только поверх TLS."),
+        "auth_request": ("Внешняя проверка доступа", "Разрешение определяется результатом служебного subrequest к сервису авторизации."),
+        "allow": ("Разрешение по адресу", "Разрешает указанный IP/CIDR; правила allow/deny проверяются по порядку до первого совпадения."),
+        "deny": ("Запрет по адресу", "Запрещает указанный IP/CIDR; deny all обычно завершает allowlist."),
+        "limit_req": ("Ограничение частоты", "Сдерживает частоту запросов и влияет на устойчивость к перегрузке и подбору."),
+        "limit_conn": ("Ограничение соединений", "Ограничивает число одновременных соединений для заданного ключа."),
+        "client_max_body_size": ("Максимальный размер запроса", "Ограничивает размер тела и загрузок; превышение приводит к HTTP 413."),
+        "proxy_cache": ("Кэш reverse proxy", "Снижает нагрузку, но требует исключить персональные и авторизованные ответы."),
+        "proxy_set_header": ("Заголовок для upstream", "Меняет сведения, которые получит приложение: Host, адрес клиента, протокол или авторизацию."),
+        "add_header": ("Заголовок ответа", "Добавляет защитный или прикладной заголовок; наследование зависит от уровня и других add_header."),
+        "internal": ("Только внутренний переход", "Прямой запрос клиента получит 404; маршрут доступен через внутреннее перенаправление."),
+        "stub_status": ("Статус Nginx", "Показывает технические метрики и должен быть закрыт allowlist или аутентификацией."),
+        "autoindex": ("Листинг каталога", "Значение on показывает список файлов при отсутствии index и может раскрыть содержимое."),
+    }
+    directives = []
+    for name, (title, impact) in directive_help.items():
+        values = _directive_values(excerpt, name)
+        if name in {"internal", "stub_status"} and re.search(r"\b" + name + r"\s*;", excerpt, re.I):
+            values = ["on"]
+        for value in values:
+            directives.append({"name": name, "value": value, "title": title, "impact": impact})
+    if not directives:
+        directives.append({
+            "name": "inheritance", "value": "server/http", "title": "Наследуемая обработка",
+            "impact": "В блоке нет явно распознанного обработчика; результат определяется унаследованными директивами и модулями Nginx.",
+        })
+    return {"match_type": match_type, "matching": matching, "directives": directives}
+
+
+def build_publication_setting_explanations(publication):
+    values = [
+        {"setting": "listen", "value": ", ".join(publication.get("listen", [])),
+         "meaning": "Адреса, порты и параметры сокета, на которых Nginx принимает соединения.",
+         "impact": "Определяет потенциальную сетевую зону, HTTP/TLS и default_server."},
+        {"setting": "server_name", "value": ", ".join(publication.get("server_names", [])),
+         "meaning": "Имена Host/SNI, по которым выбирается виртуальный сервер.",
+         "impact": "Wildcard или отсутствие точного имени расширяет поверхность публикации."},
+        {"setting": "TLS", "value": "включён" if publication.get("tls") else "не включён",
+         "meaning": "Шифрование и подтверждение подлинности соединения клиента.",
+         "impact": "Для внешних и чувствительных ресурсов отсутствие TLS создаёт риск перехвата и подмены."},
+        {"setting": "upstream", "value": ", ".join(publication.get("upstreams", [])) or "не найден",
+         "meaning": "Приложение или файловый обработчик, которому передаётся запрос.",
+         "impact": "Определяет внутреннюю сетевую связь, протокол и границу доверия."},
+        {"setting": "журналирование", "value": "отключено" if any("access_log off" in x.get("evidence", "") for x in publication.get("findings", [])) else "явно не отключено",
+         "meaning": "Регистрация HTTP-запросов и ошибок публикации.",
+         "impact": "Необходимо для расследований, мониторинга и контроля событий безопасности."},
+    ]
     return values
 
 
@@ -760,6 +842,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
             "fingerprint": fingerprint, "canonical": canonical,
         }
         publication["summary"] = build_publication_summary(publication)
+        publication["setting_explanations"] = build_publication_setting_explanations(publication)
         publications.append(publication)
     return publications
 
