@@ -38,7 +38,7 @@ chmod -R o-rwx /opt/nginx-scope
 
 install -o root -g root -m 0644 "$PROJECT_DIR/deploy/nginx-scope.service" /etc/systemd/system/nginx-scope.service
 systemctl daemon-reload
-systemctl enable --now nginx-scope.service
+systemctl enable nginx-scope.service
+systemctl restart nginx-scope.service
 echo "Сервис запущен на http://127.0.0.1:8080"
 echo "Настройте TLS reverse proxy по образцу deploy/nginx-scope.conf.example"
-
