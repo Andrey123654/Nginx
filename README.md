@@ -16,10 +16,10 @@
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
-uvicorn web.app:app --host 127.0.0.1 --port 8080
+uvicorn web.app:app --host 0.0.0.0 --port 8080
 ```
 
-Откройте `http://127.0.0.1:8080`. Production-развёртывание на Ubuntu Server 26.04 LTS описано в [docs/UBUNTU_DEPLOYMENT.md](docs/UBUNTU_DEPLOYMENT.md). Доступны Docker Compose и hardened systemd unit.
+Откройте `http://<IP-СЕРВЕРА>:8080`. Сервис слушает все IPv4-интерфейсы; ограничьте порт корпоративной подсетью через firewall и используйте HTTPS reverse proxy для production. Развёртывание на Ubuntu Server 26.04 LTS описано в [docs/UBUNTU_DEPLOYMENT.md](docs/UBUNTU_DEPLOYMENT.md). Доступны Docker Compose и hardened systemd unit.
 
 Готовый каркас для регулярной проверки ресурсов из двух точек наблюдения:
 
