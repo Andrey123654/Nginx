@@ -56,10 +56,30 @@ form.addEventListener('submit', async event => {
   button.disabled = true; label.textContent = 'Анализируем…';
   try {
     const response = await fetch('/api/analyze', {method:'POST', body:new FormData(form)});
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || 'Не удалось выполнить анализ');
+    const body = await response.text();
+    let data = null;
+    try { data = body ? JSON.parse(body) : null; } catch (_) { data = null; }
+    if (!response.ok) {
+      let reason = {message: `Сервер отклонил файл (HTTP ${response.status})`};
+      if (data && typeof data.detail === 'object' && !Array.isArray(data.detail)) reason = data.detail;
+      else if (data && typeof data.detail === 'string') reason.message = data.detail;
+      else if (Array.isArray(data?.detail)) reason.message = data.detail.map(item => item.msg).join('; ');
+      if (response.status === 413 && !reason.hint) reason.hint = 'Файл превышает лимит reverse proxy или приложения';
+      const error = new Error(reason.message || 'Не удалось выполнить анализ');
+      error.reason = reason;
+      throw error;
+    }
     render(data);
-  } catch (error) { errorBox.textContent = error.message; errorBox.hidden = false; }
+  } catch (error) {
+    const reason = error.reason || {message: error.message};
+    errorBox.replaceChildren();
+    const title = document.createElement('b'); title.textContent = reason.message || 'Файл отклонён';
+    errorBox.appendChild(title);
+    if (reason.filename) { const file = document.createElement('span'); file.textContent = `Файл: ${reason.filename}`; errorBox.appendChild(file); }
+    if (reason.hint) { const hint = document.createElement('span'); hint.textContent = `Что сделать: ${reason.hint}`; errorBox.appendChild(hint); }
+    if (reason.code) { const code = document.createElement('small'); code.textContent = `Код причины: ${reason.code}`; errorBox.appendChild(code); }
+    errorBox.hidden = false;
+  }
   finally { button.disabled = false; label.textContent = 'Запустить анализ'; }
 });
 
