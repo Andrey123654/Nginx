@@ -52,13 +52,13 @@ async def security_headers(request, call_next):
     return response
 
 
-async def read_upload(upload: UploadFile, allowed_suffixes, required=True):
+async def read_upload(upload: UploadFile, allowed_suffixes, required=True, allow_no_suffix=False):
     if upload is None:
         if required:
             raise HTTPException(status_code=400, detail="Обязательный файл не передан")
         return None
     suffix = Path(upload.filename or "").suffix.lower()
-    if suffix not in allowed_suffixes:
+    if suffix not in allowed_suffixes and not (allow_no_suffix and suffix == ""):
         raise HTTPException(status_code=415, detail=f"Недопустимый тип файла: {suffix or 'без расширения'}")
     chunks = []
     total = 0
@@ -142,7 +142,11 @@ async def analyze(
     external_sensor: Optional[UploadFile] = File(None),
     internal_sensor: Optional[UploadFile] = File(None),
 ):
-    config_text = await read_upload(nginx_config, ALLOWED_CONFIG_SUFFIXES)
+    config_text = await read_upload(
+        nginx_config,
+        ALLOWED_CONFIG_SUFFIXES,
+        allow_no_suffix=True,
+    )
     inventory_text = await read_upload(inventory, ALLOWED_JSON_SUFFIXES, required=False)
     external_text = await read_upload(external_sensor, ALLOWED_JSON_SUFFIXES, required=False)
     internal_text = await read_upload(internal_sensor, ALLOWED_JSON_SUFFIXES, required=False)
