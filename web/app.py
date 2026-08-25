@@ -20,7 +20,7 @@ from audit import (
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
@@ -53,14 +53,26 @@ async def security_headers(request, call_next):
     return response
 
 
+def upload_rejection(status_code, code, message, upload=None, hint=None):
+    detail = {"code": code, "message": message}
+    if upload is not None and upload.filename:
+        detail["filename"] = Path(upload.filename).name[:160]
+    if hint:
+        detail["hint"] = hint
+    return HTTPException(status_code=status_code, detail=detail)
+
+
 async def read_upload(upload: UploadFile, allowed_suffixes=None, required=True, allow_no_suffix=False):
     if upload is None:
         if required:
-            raise HTTPException(status_code=400, detail="Обязательный файл не передан")
+            raise upload_rejection(400, "file_missing", "Обязательный файл не передан",
+                                   hint="Выберите файл конфигурации Nginx и повторите проверку")
         return None
     suffix = Path(upload.filename or "").suffix.lower()
     if allowed_suffixes is not None and suffix not in allowed_suffixes and not (allow_no_suffix and suffix == ""):
-        raise HTTPException(status_code=415, detail=f"Недопустимый тип файла: {suffix or 'без расширения'}")
+        raise upload_rejection(415, "unsupported_extension",
+                               f"Недопустимое расширение: {suffix or 'без расширения'}", upload,
+                               "Для inventory и датчиков используйте JSON-файл с расширением .json")
     chunks = []
     total = 0
     while True:
@@ -69,15 +81,19 @@ async def read_upload(upload: UploadFile, allowed_suffixes=None, required=True, 
             break
         total += len(chunk)
         if total > MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="Файл превышает допустимый размер")
+            raise upload_rejection(413, "file_too_large",
+                                   f"Размер файла превышает лимит {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ", upload,
+                                   "Уменьшите файл или согласованно увеличьте MAX_UPLOAD_BYTES и client_max_body_size")
         chunks.append(chunk)
     raw = b"".join(chunks)
     if b"\x00" in raw:
-        raise HTTPException(status_code=415, detail="Бинарные файлы не поддерживаются")
+        raise upload_rejection(415, "binary_file", "Файл содержит бинарные данные", upload,
+                               "Загрузите текстовый nginx.conf или текстовый вывод nginx -T")
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=415, detail="Файл должен быть в UTF-8") from exc
+        raise upload_rejection(415, "invalid_encoding", "Файл невозможно прочитать как UTF-8", upload,
+                               "Преобразуйте текст в кодировку UTF-8 и повторите проверку") from exc
 
 
 def parse_json_payload(text, label):
