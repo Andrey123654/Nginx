@@ -26,7 +26,7 @@ fi
 install -d -o nginxscope -g nginxscope -m 0750 /opt/nginx-scope
 install -o nginxscope -g nginxscope -m 0640 "$PROJECT_DIR/audit.py" /opt/nginx-scope/audit.py
 install -d -o nginxscope -g nginxscope -m 0750 /opt/nginx-scope/web /opt/nginx-scope/web/static
-install -o nginxscope -g nginxscope -m 0640 "$PROJECT_DIR/web/__init__.py" "$PROJECT_DIR/web/app.py" "$PROJECT_DIR/web/pdf_report.py" /opt/nginx-scope/web/
+install -o nginxscope -g nginxscope -m 0640 "$PROJECT_DIR/web/__init__.py" "$PROJECT_DIR/web/app.py" "$PROJECT_DIR/web/pdf_report.py" "$PROJECT_DIR/web/sarif_report.py" /opt/nginx-scope/web/
 install -o nginxscope -g nginxscope -m 0640 "$PROJECT_DIR"/web/static/* /opt/nginx-scope/web/static/
 install -o nginxscope -g nginxscope -m 0640 "$PROJECT_DIR/requirements.txt" /opt/nginx-scope/requirements.txt
 
