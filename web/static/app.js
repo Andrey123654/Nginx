@@ -52,11 +52,12 @@ function render(report) {
     const actual = (item.actual_visibility || []).map(zone => `<span class="zone-chip ${esc(zone)}">${esc(visibilityName(zone))}</span>`).join('') || 'Нет данных датчиков';
     const addresses = Object.entries(item.addresses || {}).map(([zone, ips]) => `${visibilityName(zone)}: ${(ips || []).join(', ')}`).join('<br>') || '—';
     const findings = item.findings.length ? item.findings.map(finding => `<div class="publication-finding ${esc(finding.severity)}"><b>${esc(finding.message)}</b><span>${esc(finding.recommendation)}</span><small>${esc(finding.control)} · ${esc(finding.rule)}</small></div>`).join('') : '<div class="publication-finding"><b>Локальных замечаний не найдено</b><span>Проверьте общие замечания конфигурации выше.</span></div>';
-    const locations = item.locations.length ? `<div class="location-list"><b>Настройки location</b>${item.locations.map(location => `<details><summary>${esc(location.path)}</summary><pre class="config-view">${esc(location.config_excerpt)}</pre></details>`).join('')}</div>` : '';
+    const settingHelp = `<details class="setting-guide"><summary>Что означают основные настройки публикации</summary>${(item.setting_explanations || []).map(setting => `<div><b>${esc(setting.setting)}: ${esc(setting.value)}</b><span>${esc(setting.meaning)} ${esc(setting.impact)}</span></div>`).join('')}</details>`;
+    const locations = item.locations.length ? `<div class="location-list"><b>Настройки location</b>${item.locations.map(location => `<details><summary>${esc(location.path)} · ${esc(location.explanation?.match_type || '')}</summary><div class="location-explanation"><b>Что это и как выбирается</b><p>${esc(location.explanation?.matching || 'Пояснение недоступно')}</p>${(location.explanation?.directives || []).map(directive => `<div><code>${esc(directive.name)} ${esc(directive.value)}</code><span><b>${esc(directive.title)}.</b> ${esc(directive.impact)}</span></div>`).join('')}</div><pre class="config-view">${esc(location.config_excerpt)}</pre></details>`).join('')}</div>` : '';
     return `<article class="publication-card">
       <header class="publication-head"><div><h3>${esc(item.server_names.join(', '))}</h3><p>${esc(item.id)} · строка ${esc(item.line_start)} · ${item.publication_type === 'protective_default' ? 'защитный catch-all' : item.tls ? 'HTTPS/TLS' : 'HTTP'}</p></div><div class="publication-score"><b>${esc(item.score)}</b><span>оценка</span></div></header>
       <section class="publication-summary"><b>Краткая справка</b><p>${esc(item.summary?.text || 'Резюме недоступно')}</p><div><span>${esc(item.summary?.exposure || '—')}</span><span>${esc(item.summary?.purpose || '—')}</span><span>${esc(item.summary?.security || '—')}</span></div></section>
-      <div class="publication-meta"><div><b>Listen</b><span>${esc(item.listen.join(', '))}</span></div><div><b>Потенциальная зона</b><span>${declared}</span></div><div><b>Фактически по датчикам</b><span>${actual}</span></div><div><b>Адреса / upstream</b><span>${addresses}<br>${esc(item.upstreams.join(', ') || 'upstream не найден')}</span></div></div>
+      <div class="publication-meta"><div><b>Listen</b><span>${esc(item.listen.join(', '))}</span></div><div><b>Потенциальная зона</b><span>${declared}</span></div><div><b>Фактически по датчикам</b><span>${actual}</span></div><div><b>Адреса / upstream</b><span>${addresses}<br>${esc(item.upstreams.join(', ') || 'upstream не найден')}</span></div></div>${settingHelp}
       <div class="publication-body"><pre class="config-view">${esc(item.config_excerpt)}</pre><div class="publication-findings">${findings}</div></div>${locations}
     </article>`;
   }).join('');
@@ -124,9 +125,31 @@ document.querySelectorAll('.tabs button').forEach(button => button.addEventListe
   ['findings','publications','visibility','changes'].forEach(name => { document.querySelector(`#${name}-panel`).hidden = button.dataset.tab !== name; });
 }));
 
-function download(name, type, content) { const blob = new Blob([content], {type}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url); }
+function download(name, type, content) {
+  const blob = new Blob([content], {type});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = name; link.hidden = true;
+  document.body.appendChild(link); link.click(); link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 document.querySelector('#export-fixed').addEventListener('click', () => currentReport?.corrected_config && download('nginx.corrected.conf','text/plain;charset=utf-8',currentReport.corrected_config));
 document.querySelector('#save-baseline').addEventListener('click', () => currentReport?.baseline && download('nginx-baseline.json','application/json;charset=utf-8',JSON.stringify(currentReport.baseline,null,2)));
+document.querySelector('#export-pdf').addEventListener('click', async event => {
+  if (!currentReport) return;
+  const button = event.currentTarget; button.disabled = true; const oldText = button.textContent; button.textContent = 'Готовим PDF…';
+  try {
+    const {corrected_config, ...pdfReport} = currentReport;
+    const response = await fetch('/api/export/pdf', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(pdfReport)});
+    if (!response.ok) throw new Error(`Не удалось сформировать PDF (HTTP ${response.status})`);
+    const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a');
+    link.href = url; link.download = 'nginx-scope-report.pdf'; link.hidden = true;
+    document.body.appendChild(link); link.click(); link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) {
+    errorBox.textContent = error.message; errorBox.hidden = false;
+  } finally { button.disabled = false; button.textContent = oldText; }
+});
 document.querySelector('#export-json').addEventListener('click', () => {
   if (!currentReport) return;
   const {corrected_config, ...reportWithoutConfig} = currentReport;
