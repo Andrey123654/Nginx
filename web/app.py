@@ -20,10 +20,10 @@ from audit import (
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
+APP_VERSION = "1.0.2"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
-ALLOWED_CONFIG_SUFFIXES = {".conf", ".txt"}
 ALLOWED_JSON_SUFFIXES = {".json"}
 
 app = FastAPI(
@@ -40,6 +40,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.middleware("http")
 async def security_headers(request, call_next):
     response = await call_next(request)
+    response.headers["X-Nginx-Scope-Version"] = APP_VERSION
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -52,13 +53,13 @@ async def security_headers(request, call_next):
     return response
 
 
-async def read_upload(upload: UploadFile, allowed_suffixes, required=True, allow_no_suffix=False):
+async def read_upload(upload: UploadFile, allowed_suffixes=None, required=True, allow_no_suffix=False):
     if upload is None:
         if required:
             raise HTTPException(status_code=400, detail="Обязательный файл не передан")
         return None
     suffix = Path(upload.filename or "").suffix.lower()
-    if suffix not in allowed_suffixes and not (allow_no_suffix and suffix == ""):
+    if allowed_suffixes is not None and suffix not in allowed_suffixes and not (allow_no_suffix and suffix == ""):
         raise HTTPException(status_code=415, detail=f"Недопустимый тип файла: {suffix or 'без расширения'}")
     chunks = []
     total = 0
@@ -132,7 +133,11 @@ async def index():
 
 @app.get("/healthz", include_in_schema=False)
 async def healthz():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "config_upload": "any UTF-8 text filename, max 5 MiB",
+    }
 
 
 @app.post("/api/analyze", include_in_schema=False)
@@ -142,11 +147,7 @@ async def analyze(
     external_sensor: Optional[UploadFile] = File(None),
     internal_sensor: Optional[UploadFile] = File(None),
 ):
-    config_text = await read_upload(
-        nginx_config,
-        ALLOWED_CONFIG_SUFFIXES,
-        allow_no_suffix=True,
-    )
+    config_text = await read_upload(nginx_config)
     inventory_text = await read_upload(inventory, ALLOWED_JSON_SUFFIXES, required=False)
     external_text = await read_upload(external_sensor, ALLOWED_JSON_SUFFIXES, required=False)
     internal_text = await read_upload(internal_sensor, ALLOWED_JSON_SUFFIXES, required=False)
