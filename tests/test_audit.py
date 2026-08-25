@@ -82,6 +82,19 @@ class AuditTests(unittest.TestCase):
         self.assertNotIn("config_excerpt", json.dumps(baseline))
         self.assertEqual(audit.compare_publication_baseline(publications, baseline)["status"], "unchanged")
 
+    def test_corrected_config_does_not_flag_protective_default_as_vulnerable(self):
+        config = "events {} http { server { listen 443 ssl; server_name app.example; } }"
+        corrected, _, _ = audit.build_corrected_nginx_config(config)
+        publications = audit.extract_publications(corrected)
+        catch_all = next(item for item in publications if item["publication_type"] == "protective_default")
+        self.assertEqual(catch_all["findings"], [])
+        self.assertEqual(catch_all["score"], 100)
+        before = audit.analyze_nginx_text(config) + [finding for item in audit.extract_publications(config) for finding in item["findings"]]
+        after = audit.analyze_nginx_text(corrected) + [finding for item in publications for finding in item["findings"]]
+        self.assertLessEqual(len(after), len(before))
+        tls_block = next(item["config_excerpt"] for item in publications if item["tls"])
+        self.assertIn("X-Content-Type-Options", tls_block)
+
     def test_testssl_findings_are_normalized(self):
         sensor = self.sensor("internal", True, "10.1.2.3")
         sensor["targets"][0]["probes"][0]["url"] = "https://admin.example.invalid/"
