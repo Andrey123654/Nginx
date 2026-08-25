@@ -75,6 +75,10 @@ class AuditTests(unittest.TestCase):
         rules = {item["rule"] for item in publications[0]["findings"]}
         self.assertIn("publication-cleartext", rules)
         self.assertIn("publication-sensitive-endpoint-open", rules)
+        summary = publications[0]["summary"]
+        self.assertIn("public.example", summary["text"])
+        self.assertIn("наружу", summary["exposure"])
+        self.assertIn("Оценка", summary["security"])
 
     def test_publication_baseline_omits_raw_config(self):
         publications = audit.extract_publications("events {} http { server { listen 80; server_name app.example; } }")
