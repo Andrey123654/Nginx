@@ -102,6 +102,45 @@ class AuditTests(unittest.TestCase):
         tls_block = next(item["config_excerpt"] for item in publications if item["tls"])
         self.assertIn("X-Content-Type-Options", tls_block)
 
+    def test_gixy_derived_rules_are_reported_per_publication(self):
+        config = """events {} http {
+          add_header X-Content-Type-Options nosniff always;
+          server {
+            listen 443 ssl; server_name app.example;
+            location /files {
+              proxy_pass http://$arg_target;
+              proxy_set_header Host $http_host;
+              add_header X-Trace $arg_trace;
+              alias /srv/files/;
+              allow 10.0.0.0/8;
+              valid_referers none server_names;
+            }
+          }
+        }"""
+        publication = audit.extract_publications(config, "nginx.conf")[0]
+        rules = {item["rule"] for item in publication["findings"]}
+        self.assertTrue({
+            "publication-dynamic-upstream-ssrf", "publication-host-header-spoofing",
+            "publication-http-splitting", "publication-add-header-shadow",
+            "publication-alias-traversal", "publication-incomplete-acl",
+            "publication-unsafe-valid-referers",
+        } <= rules)
+        sourced = next(item for item in publication["findings"] if item["rule"] == "publication-dynamic-upstream-ssrf")
+        self.assertEqual(sourced["source"], "nginx.conf")
+        self.assertTrue(sourced["references"])
+
+    def test_corrected_location_keeps_security_headers(self):
+        config = """events {} http { server { listen 443 ssl; server_name app.example;
+          location / { add_header X-App value; proxy_pass https://app; proxy_ssl_verify on; }
+        } }"""
+        corrected, _, _ = audit.build_corrected_nginx_config(config)
+        publication = next(item for item in audit.extract_publications(corrected) if item["publication_type"] == "application")
+        rules = {item["rule"] for item in publication["findings"]}
+        self.assertNotIn("publication-add-header-shadow", rules)
+        location = publication["locations"][0]["config_excerpt"]
+        self.assertIn("Strict-Transport-Security", location)
+        self.assertIn("X-Content-Type-Options", location)
+
     def test_testssl_findings_are_normalized(self):
         sensor = self.sensor("internal", True, "10.1.2.3")
         sensor["targets"][0]["probes"][0]["url"] = "https://admin.example.invalid/"
