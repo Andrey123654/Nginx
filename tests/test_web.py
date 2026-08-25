@@ -13,8 +13,8 @@ def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.2.1"
-    assert response.headers["x-nginx-scope-version"] == "1.2.1"
+    assert response.json()["version"] == "1.2.2"
+    assert response.headers["x-nginx-scope-version"] == "1.2.2"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -33,6 +33,7 @@ def test_analyze_returns_findings_without_echoing_config():
     assert len(payload["publications"]) == 1
     assert payload["publications"][0]["server_names"] == ["(не задан)"]
     assert payload["baseline"]["kind"] == "nginx-publication-baseline"
+    assert payload["publications"][0]["summary"]["text"]
 
 
 def test_baseline_comparison_detects_publication_change():
