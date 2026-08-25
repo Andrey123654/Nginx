@@ -31,10 +31,23 @@ def test_binary_file_is_rejected():
     assert response.status_code == 415
 
 
+def test_extensionless_nginx_output_is_accepted():
+    response = client.post("/api/analyze", files={
+        "nginx_config": ("nginx-T", b"events {} http { server_tokens off; }", "text/plain")
+    })
+    assert response.status_code == 200
+
+
+def test_unapproved_extension_is_rejected():
+    response = client.post("/api/analyze", files={
+        "nginx_config": ("nginx.yaml", b"events {}", "text/plain")
+    })
+    assert response.status_code == 415
+
+
 def test_sensor_requires_inventory():
     response = client.post("/api/analyze", files={
         "nginx_config": ("nginx.conf", b"events {}", "text/plain"),
         "external_sensor": ("sensor.json", b'{"kind":"sensor","zone":"external"}', "application/json"),
     })
     assert response.status_code == 422
-
