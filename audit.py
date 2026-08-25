@@ -605,6 +605,50 @@ def _publication_finding(severity, rule, publication_id, message, recommendation
     return item
 
 
+def build_publication_summary(publication):
+    """Return a concise operator-facing brief for one publication."""
+    if publication.get("publication_type") == "protective_default":
+        return {
+            "exposure": "Защитный системный listener",
+            "purpose": "Отклонение запросов с неизвестным Host",
+            "security": "Замечаний по этому блоку нет",
+            "text": (
+                f"Защитный catch-all на {', '.join(publication.get('listen', []))} отклоняет запросы "
+                "с неизвестным именем хоста и не направляет их в приложение."
+            ),
+        }
+    zone_names = {
+        "external": "наружу", "internal": "во внутренний контур",
+        "local": "только локально", "unknown": "в зону, требующую уточнения",
+    }
+    declared = [zone_names.get(zone, zone) for zone in publication.get("declared_visibility", [])]
+    actual = [zone_names.get(zone, zone) for zone in publication.get("actual_visibility", [])]
+    protocol = "HTTPS/TLS" if publication.get("tls") else "HTTP без TLS"
+    locations = publication.get("locations", [])
+    paths = ", ".join(item["path"] for item in locations[:3]) or "location не выделены"
+    if len(locations) > 3:
+        paths += f" и ещё {len(locations) - 3}"
+    upstreams = publication.get("upstreams", [])
+    route = ", ".join(upstreams[:2]) if upstreams else "локальная выдача или return"
+    if len(upstreams) > 2:
+        route += f" и ещё {len(upstreams) - 2}"
+    findings = publication.get("findings", [])
+    top_risks = "; ".join(item["message"] for item in findings[:2]) if findings else "локальных замечаний не найдено"
+    actual_text = ", ".join(actual) if actual else "не подтверждена датчиками"
+    exposure = ", ".join(declared) if declared else "не определена"
+    names = ", ".join(publication.get("server_names", []))
+    return {
+        "exposure": f"Потенциально: {exposure}; фактически: {actual_text}",
+        "purpose": f"{len(locations)} location ({paths}); назначение запросов: {route}",
+        "security": f"Оценка {publication.get('score', 0)}/100; замечаний: {len(findings)}",
+        "text": (
+            f"{names}: {protocol} на {', '.join(publication.get('listen', []))}. "
+            f"Потенциальная видимость — {exposure}, фактическая — {actual_text}. "
+            f"Маршруты: {paths}; upstream: {route}. Кратко по рискам: {top_risks}."
+        ),
+    }
+
+
 def extract_publications(content, source="uploaded-nginx-config"):
     """Build a per-server publication inventory and targeted security analytics."""
     publications = []
@@ -699,7 +743,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
             "semantic_digest": hashlib.sha256(normalized_block.encode("utf-8")).hexdigest(),
         }
         fingerprint = hashlib.sha256(json.dumps(canonical, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-        publications.append({
+        publication = {
             "id": publication_id, "number": number, "source": source,
             "line_start": content.count("\n", 0, start) + 1,
             "server_names": names, "listen": listens, "tls": tls,
@@ -714,7 +758,9 @@ def extract_publications(content, source="uploaded-nginx-config"):
                 "tracked_settings": tracked_settings,
             },
             "fingerprint": fingerprint, "canonical": canonical,
-        })
+        }
+        publication["summary"] = build_publication_summary(publication)
+        publications.append(publication)
     return publications
 
 
@@ -746,6 +792,7 @@ def correlate_publications(publications, inventory, resources):
         publication["resource_ids"] = sorted(matched)
         publication["actual_visibility"] = sorted(actual)
         publication["addresses"] = {zone: sorted(values) for zone, values in addresses.items()}
+        publication["summary"] = build_publication_summary(publication)
     return publications
 
 
