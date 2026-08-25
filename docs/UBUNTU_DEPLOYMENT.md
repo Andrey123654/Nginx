@@ -43,7 +43,14 @@ docker compose build --pull
 docker compose up -d
 ```
 
-Для systemd повторно запустите `sudo ./deploy/install-ubuntu.sh` после `git pull --ff-only`.
+Для systemd повторно запустите `sudo ./deploy/install-ubuntu.sh` после `git pull --ff-only`. Установщик копирует обновлённые файлы и принудительно перезапускает уже работающий `nginx-scope.service`.
+
+Если код был обновлён вручную в `/opt/nginx-scope`, обязательно перезапустите процесс:
+
+```bash
+sudo systemctl restart nginx-scope
+sudo systemctl status nginx-scope --no-pager
+```
 
 ## Контроль после установки
 
