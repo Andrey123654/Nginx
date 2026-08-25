@@ -66,7 +66,7 @@
     <section id="report" class="report panel" hidden>
       <div class="report-head">
         <div><div class="step">02 · РЕЗУЛЬТАТ</div><h2>Отчёт о публикациях</h2><p id="generated-at"></p></div>
-        <div class="report-actions"><button id="export-csv" type="button">CSV</button><button id="export-json" type="button">JSON</button></div>
+        <div class="report-actions"><button id="export-fixed" type="button">Исправленный конфиг</button><button id="export-csv" type="button">CSV</button><button id="export-json" type="button">JSON</button></div>
       </div>
 
       <div class="summary-strip">
@@ -83,7 +83,7 @@
       </nav>
 
       <div id="findings-panel" class="tab-panel">
-        <div class="table-wrap"><table><thead><tr><th>Уровень</th><th>Замечание</th><th>Объект</th><th>Свидетельство</th></tr></thead><tbody id="findings-body"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>Уровень</th><th>Замечание</th><th>Рекомендация</th><th>Объект</th><th>Свидетельство</th></tr></thead><tbody id="findings-body"></tbody></table></div>
         <div id="findings-empty" class="empty" hidden><b>Замечаний не найдено</b><span>Проверенные правила не выявили отклонений.</span></div>
       </div>
 
@@ -93,7 +93,7 @@
       </div>
     </section>
   </main>
-  <footer><span>NGINX Scope</span><span>Конфигурационный аудит · версия 1.0</span></footer>
+  <footer><span>NGINX Scope</span><span>Конфигурационный аудит · версия 1.1</span></footer>
   <script src="/static/app.js" defer></script>
 </body>
 </html>
