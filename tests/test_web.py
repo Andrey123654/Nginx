@@ -13,8 +13,8 @@ def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.2.0"
-    assert response.headers["x-nginx-scope-version"] == "1.2.0"
+    assert response.json()["version"] == "1.2.1"
+    assert response.headers["x-nginx-scope-version"] == "1.2.1"
     assert response.headers["x-frame-options"] == "DENY"
 
 
