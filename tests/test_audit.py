@@ -79,6 +79,9 @@ class AuditTests(unittest.TestCase):
         self.assertIn("public.example", summary["text"])
         self.assertIn("наружу", summary["exposure"])
         self.assertIn("Оценка", summary["security"])
+        location_help = publications[0]["locations"][0]["explanation"]
+        self.assertEqual(location_help["match_type"], "Префиксный маршрут")
+        self.assertTrue(any(item["name"] == "proxy_pass" for item in location_help["directives"]))
 
     def test_publication_baseline_omits_raw_config(self):
         publications = audit.extract_publications("events {} http { server { listen 80; server_name app.example; } }")
