@@ -11,7 +11,9 @@ client = TestClient(app)
 def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "ok"
+    assert response.json()["version"] == "1.0.2"
+    assert response.headers["x-nginx-scope-version"] == "1.0.2"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -38,11 +40,11 @@ def test_extensionless_nginx_output_is_accepted():
     assert response.status_code == 200
 
 
-def test_unapproved_extension_is_rejected():
+def test_arbitrary_extension_is_accepted_for_text_config():
     response = client.post("/api/analyze", files={
         "nginx_config": ("nginx.yaml", b"events {}", "text/plain")
     })
-    assert response.status_code == 415
+    assert response.status_code == 200
 
 
 def test_sensor_requires_inventory():
