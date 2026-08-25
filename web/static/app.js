@@ -55,6 +55,7 @@ function render(report) {
     const locations = item.locations.length ? `<div class="location-list"><b>Настройки location</b>${item.locations.map(location => `<details><summary>${esc(location.path)}</summary><pre class="config-view">${esc(location.config_excerpt)}</pre></details>`).join('')}</div>` : '';
     return `<article class="publication-card">
       <header class="publication-head"><div><h3>${esc(item.server_names.join(', '))}</h3><p>${esc(item.id)} · строка ${esc(item.line_start)} · ${item.publication_type === 'protective_default' ? 'защитный catch-all' : item.tls ? 'HTTPS/TLS' : 'HTTP'}</p></div><div class="publication-score"><b>${esc(item.score)}</b><span>оценка</span></div></header>
+      <section class="publication-summary"><b>Краткая справка</b><p>${esc(item.summary?.text || 'Резюме недоступно')}</p><div><span>${esc(item.summary?.exposure || '—')}</span><span>${esc(item.summary?.purpose || '—')}</span><span>${esc(item.summary?.security || '—')}</span></div></section>
       <div class="publication-meta"><div><b>Listen</b><span>${esc(item.listen.join(', '))}</span></div><div><b>Потенциальная зона</b><span>${declared}</span></div><div><b>Фактически по датчикам</b><span>${actual}</span></div><div><b>Адреса / upstream</b><span>${addresses}<br>${esc(item.upstreams.join(', ') || 'upstream не найден')}</span></div></div>
       <div class="publication-body"><pre class="config-view">${esc(item.config_excerpt)}</pre><div class="publication-findings">${findings}</div></div>${locations}
     </article>`;
