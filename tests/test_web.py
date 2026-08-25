@@ -12,8 +12,8 @@ def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.0.5"
-    assert response.headers["x-nginx-scope-version"] == "1.0.5"
+    assert response.json()["version"] == "1.1.0"
+    assert response.headers["x-nginx-scope-version"] == "1.1.0"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -25,7 +25,10 @@ def test_analyze_returns_findings_without_echoing_config():
     rules = {item["rule"] for item in payload["findings"]}
     assert "nginx-old-tls" in rules
     assert "nginx-autoindex" in rules
-    assert config.decode() not in response.text
+    assert payload["corrected_config"] != config.decode()
+    assert "ssl_protocols TLSv1.2 TLSv1.3;" in payload["corrected_config"]
+    assert "autoindex off;" in payload["corrected_config"]
+    assert all(item.get("recommendation") for item in payload["findings"] if item["rule"].startswith("nginx-"))
 
 
 def test_binary_file_is_rejected():
