@@ -26,6 +26,10 @@ function statusName(value) { return ({compliant:'Соответствует',une
 function visibilityName(value) { return ({external:'Наружу',internal:'Внутренний контур',local:'Только сервер',unknown:'Требует проверки'})[value] || value; }
 function esc(value) { const div = document.createElement('div'); div.textContent = String(value ?? ''); return div.innerHTML; }
 function valueText(value) { return Array.isArray(value) ? value.join(', ') || '—' : typeof value === 'boolean' ? (value ? 'да' : 'нет') : String(value ?? '—'); }
+function referenceLinks(item) {
+  const references = item.references || [];
+  return references.length ? `<small class="finding-references">Основание: ${references.map(reference => `<a href="${esc(reference.url)}" target="_blank" rel="noopener noreferrer">${esc(reference.title)}</a>`).join(', ')}</small>` : '';
+}
 
 function render(report) {
   currentReport = report;
@@ -43,7 +47,7 @@ function render(report) {
   document.querySelector('#findings-body').innerHTML = report.findings.map(item => `<tr>
     <td><span class="badge ${esc(item.severity)}">${esc(severityName(item.severity))}</span></td>
     <td><b>${esc(item.message)}</b><small>${esc(item.rule)}</small></td>
-    <td class="recommendation">${esc(item.recommendation || 'Требуется анализ владельцем ресурса')}</td>
+    <td class="recommendation">${esc(item.recommendation || 'Требуется анализ владельцем ресурса')}${referenceLinks(item)}</td>
     <td class="mono">${esc(item.resource)}</td><td class="evidence">${esc(item.evidence || '—')}</td></tr>`).join('');
   document.querySelector('#findings-empty').hidden = report.findings.length > 0;
 
@@ -51,7 +55,7 @@ function render(report) {
     const declared = (item.declared_visibility || []).map(zone => `<span class="zone-chip ${esc(zone)}">${esc(visibilityName(zone))}</span>`).join('') || '—';
     const actual = (item.actual_visibility || []).map(zone => `<span class="zone-chip ${esc(zone)}">${esc(visibilityName(zone))}</span>`).join('') || 'Нет данных датчиков';
     const addresses = Object.entries(item.addresses || {}).map(([zone, ips]) => `${visibilityName(zone)}: ${(ips || []).join(', ')}`).join('<br>') || '—';
-    const findings = item.findings.length ? item.findings.map(finding => `<div class="publication-finding ${esc(finding.severity)}"><b>${esc(finding.message)}</b><span>${esc(finding.recommendation)}</span><small>${esc(finding.control)} · ${esc(finding.rule)}</small></div>`).join('') : '<div class="publication-finding"><b>Локальных замечаний не найдено</b><span>Проверьте общие замечания конфигурации выше.</span></div>';
+    const findings = item.findings.length ? item.findings.map(finding => `<div class="publication-finding ${esc(finding.severity)}"><b>${esc(finding.message)}</b><span>${esc(finding.recommendation)}</span><small>${esc(finding.control)} · ${esc(finding.rule)}</small>${referenceLinks(finding)}</div>`).join('') : '<div class="publication-finding"><b>Локальных замечаний не найдено</b><span>Проверьте общие замечания конфигурации выше.</span></div>';
     const settingHelp = `<details class="setting-guide"><summary>Что означают основные настройки публикации</summary>${(item.setting_explanations || []).map(setting => `<div><b>${esc(setting.setting)}: ${esc(setting.value)}</b><span>${esc(setting.meaning)} ${esc(setting.impact)}</span></div>`).join('')}</details>`;
     const locations = item.locations.length ? `<div class="location-list"><b>Настройки location</b>${item.locations.map(location => `<details><summary>${esc(location.path)} · ${esc(location.explanation?.match_type || '')}</summary><div class="location-explanation"><b>Что это и как выбирается</b><p>${esc(location.explanation?.matching || 'Пояснение недоступно')}</p>${(location.explanation?.directives || []).map(directive => `<div><code>${esc(directive.name)} ${esc(directive.value)}</code><span><b>${esc(directive.title)}.</b> ${esc(directive.impact)}</span></div>`).join('')}</div><pre class="config-view">${esc(location.config_excerpt)}</pre></details>`).join('')}</div>` : '';
     return `<article class="publication-card">
@@ -146,6 +150,18 @@ document.querySelector('#export-pdf').addEventListener('click', async event => {
     link.href = url; link.download = 'nginx-scope-report.pdf'; link.hidden = true;
     document.body.appendChild(link); link.click(); link.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) {
+    errorBox.textContent = error.message; errorBox.hidden = false;
+  } finally { button.disabled = false; button.textContent = oldText; }
+});
+document.querySelector('#export-sarif').addEventListener('click', async event => {
+  if (!currentReport) return;
+  const button = event.currentTarget; button.disabled = true; const oldText = button.textContent; button.textContent = 'Готовим SARIF…';
+  try {
+    const {corrected_config, ...sarifReport} = currentReport;
+    const response = await fetch('/api/export/sarif', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(sarifReport)});
+    if (!response.ok) throw new Error(`Не удалось сформировать SARIF (HTTP ${response.status})`);
+    download('nginx-scope-results.sarif', 'application/sarif+json', await response.text());
   } catch (error) {
     errorBox.textContent = error.message; errorBox.hidden = false;
   } finally { button.disabled = false; button.textContent = oldText; }
