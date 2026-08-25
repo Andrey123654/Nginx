@@ -5,6 +5,7 @@ import argparse
 import csv
 import datetime as dt
 import html
+import hashlib
 import ipaddress
 import json
 import os
@@ -496,6 +497,270 @@ def build_corrected_nginx_config(content):
         applied.append("HTTP default_server с return 444")
 
     return fixed, applied, manual
+
+
+def _directive_values(content, name):
+    clean = "\n".join(strip_comments(line) for line in content.splitlines())
+    return [" ".join(match.group(1).split()) for match in re.finditer(
+        r"(?:^|[;{}]\s*)" + re.escape(name) + r"\s+([^;]+);", clean, re.I | re.M
+    )]
+
+
+def _location_blocks(server_block):
+    values = []
+    for match in re.finditer(r"\blocation\s+([^\{]+)\{", server_block, re.I):
+        opening = match.end() - 1
+        depth = 0
+        quoted = None
+        escaped = False
+        comment = False
+        for index in range(opening, len(server_block)):
+            char = server_block[index]
+            if comment:
+                if char == "\n":
+                    comment = False
+                continue
+            if quoted:
+                if char == quoted and not escaped:
+                    quoted = None
+                escaped = char == "\\" and not escaped
+                if char != "\\":
+                    escaped = False
+                continue
+            if char == "#":
+                comment = True
+            elif char in {'"', "'"}:
+                quoted = char
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    values.append({
+                        "path": " ".join(match.group(1).split()),
+                        "config_excerpt": server_block[match.start():index + 1].strip(),
+                    })
+                    break
+    return values
+
+
+def _listen_visibility(listens):
+    zones = set()
+    basis = []
+    for listen in listens:
+        endpoint = listen.split()[0]
+        if endpoint.startswith("unix:"):
+            zones.add("internal")
+            basis.append(f"{endpoint}: unix socket")
+            continue
+        host = endpoint
+        if endpoint.isdigit():
+            host = "0.0.0.0"
+        elif endpoint.startswith("["):
+            host = endpoint[1:endpoint.find("]")]
+        elif endpoint.count(":") == 1:
+            host = endpoint.rsplit(":", 1)[0]
+        if host == "*":
+            host = "0.0.0.0"
+        elif host.lower() == "localhost":
+            host = "127.0.0.1"
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            zones.add("unknown")
+            basis.append(f"{endpoint}: имя/переменная требует проверки")
+            continue
+        if address.is_loopback:
+            zones.add("local")
+            basis.append(f"{endpoint}: только loopback")
+        elif address.is_unspecified:
+            zones.update(("internal", "external"))
+            basis.append(f"{endpoint}: все интерфейсы, внешняя доступность зависит от firewall/LB")
+        elif address.is_private or address.is_link_local:
+            zones.add("internal")
+            basis.append(f"{endpoint}: частный/локальный адрес")
+        else:
+            zones.add("external")
+            basis.append(f"{endpoint}: публичный адрес")
+    return sorted(zones), basis
+
+
+def _publication_finding(severity, rule, publication_id, message, recommendation, control, evidence=None):
+    item = finding(severity, rule, publication_id, message, evidence)
+    item["recommendation"] = recommendation
+    item["control"] = control
+    return item
+
+
+def extract_publications(content, source="uploaded-nginx-config"):
+    """Build a per-server publication inventory and targeted security analytics."""
+    publications = []
+    for number, (start, opening, end) in enumerate(_named_block_ranges(content, "server"), 1):
+        block = content[start:end].strip()
+        listens = _directive_values(block, "listen") or ["80 (implicit)"]
+        names = []
+        for value in _directive_values(block, "server_name"):
+            names.extend(value.split())
+        names = names or ["(не задан)"]
+        upstreams = _directive_values(block, "proxy_pass") + _directive_values(block, "fastcgi_pass") + _directive_values(block, "uwsgi_pass")
+        locations = _location_blocks(block)
+        declared_zones, visibility_basis = _listen_visibility([x for x in listens if not x.endswith("(implicit)")])
+        if listens == ["80 (implicit)"]:
+            declared_zones = ["internal", "external"]
+            visibility_basis = ["Неявный listen *:80: все интерфейсы"]
+        identity_seed = "|".join(sorted(names)) + f"|position:{number}"
+        publication_id = "pub-" + hashlib.sha256(identity_seed.encode("utf-8")).hexdigest()[:12]
+        clean = "\n".join(strip_comments(line) for line in block.splitlines())
+        tls = bool(re.search(r"\blisten\s+[^;]*(?:443|\bssl\b)[^;]*;|\bssl_certificate\s+", clean, re.I))
+        external_possible = "external" in declared_zones
+        findings = []
+
+        if external_possible and not tls:
+            findings.append(_publication_finding("high", "publication-cleartext", publication_id,
+                "Публикация потенциально доступна снаружи без TLS",
+                "Настройте HTTPS, перенаправляйте HTTP на HTTPS и защитите ключи/сертификаты.", "ЗКС.1", ", ".join(listens)))
+        if external_possible and any(name in {"_", "*", "(не задан)"} for name in names):
+            findings.append(_publication_finding("medium", "publication-wildcard-name", publication_id,
+                "Внешняя публикация принимает неопределённые имена хостов",
+                "Укажите точные server_name и вынесите неизвестные Host в отдельный default_server с отказом.", "КК / ЗВТ.3"))
+        if re.search(r"\baccess_log\s+off\s*;", clean, re.I):
+            findings.append(_publication_finding("high", "publication-logging-disabled", publication_id,
+                "Отключена регистрация HTTP-запросов",
+                "Включите access_log в структурированном формате, ограничьте доступ и настройте передачу в SIEM.", "ЗВТ.4", "access_log off"))
+        if re.search(r"\bproxy_ssl_verify\s+off\s*;", clean, re.I):
+            findings.append(_publication_finding("high", "publication-upstream-tls-unverified", publication_id,
+                "Отключена проверка сертификата HTTPS-upstream",
+                "Включите proxy_ssl_verify on, задайте доверенный CA и корректный proxy_ssl_name.", "ЗКС.1", "proxy_ssl_verify off"))
+        if any(value.startswith("https://") for value in upstreams) and not re.search(r"\bproxy_ssl_verify\s+on\s*;", clean, re.I):
+            findings.append(_publication_finding("medium", "publication-upstream-verify-missing", publication_id,
+                "Для HTTPS-upstream не найдена явная проверка сертификата",
+                "Добавьте proxy_ssl_verify on, proxy_ssl_trusted_certificate и proxy_ssl_server_name on.", "ЗКС.1"))
+        sensitive = any(re.search(r"(?:admin|status|metrics|debug|swagger|actuator)", loc["path"], re.I) for loc in locations)
+        if external_possible and sensitive and not re.search(r"\b(?:allow|auth_request|auth_basic)\s+", clean, re.I):
+            findings.append(_publication_finding("high", "publication-sensitive-endpoint-open", publication_id,
+                "Служебный endpoint потенциально опубликован без ограничения доступа",
+                "Ограничьте endpoint сетевым allowlist и сильной аутентификацией; предпочтительно вынесите во внутренний vhost.", "УПД / ЗВТ.2"))
+        if external_possible and not re.search(r"\blimit_req\s+", clean, re.I):
+            findings.append(_publication_finding("low", "publication-rate-limit-missing", publication_id,
+                "Не найдено ограничение частоты запросов для внешней публикации",
+                "Настройте limit_req_zone/limit_req по профилю нагрузки либо зафиксируйте эквивалентную защиту на WAF/LB.", "ЗОО.5"))
+        if re.search(r"\bclient_max_body_size\s+0\s*;", clean, re.I):
+            findings.append(_publication_finding("medium", "publication-unlimited-body", publication_id,
+                "Размер тела запроса не ограничен",
+                "Установите минимально необходимый client_max_body_size и согласуйте лимит с приложением.", "ЗОО.5", "client_max_body_size 0"))
+        if external_possible and any(value.startswith("http://") for value in upstreams):
+            findings.append(_publication_finding("low", "publication-cleartext-upstream", publication_id,
+                "Данные передаются к upstream по HTTP",
+                "Если upstream проходит через недоверенный сегмент, используйте HTTPS/mTLS; иначе документируйте границу доверия и сегментацию.", "ЗКС.1"))
+        if re.search(r"\bproxy_pass\s+https?://[^\s/@]+:[^\s/@]+@", clean, re.I):
+            findings.append(_publication_finding("critical", "publication-embedded-credentials", publication_id,
+                "В proxy_pass обнаружены встроенные учётные данные",
+                "Немедленно отзовите секрет, удалите его из конфигурации и истории, используйте защищённое хранилище секретов.", "ИАФ / КК"))
+        if external_possible and upstreams and not re.search(r"\bproxy_(?:connect|read|send)_timeout\s+", clean, re.I):
+            findings.append(_publication_finding("low", "publication-timeouts-missing", publication_id,
+                "Не найдены явные timeout для reverse proxy",
+                "Задайте минимально достаточные proxy_connect_timeout, proxy_read_timeout и proxy_send_timeout по SLA.", "ЗОО.5"))
+
+        score = max(0, 100 - sum({"critical": 24, "high": 14, "medium": 6, "low": 2}.get(x["severity"], 0) for x in findings))
+        tracked_names = (
+            "ssl_protocols", "ssl_ciphers", "access_log", "error_log", "client_max_body_size",
+            "limit_req", "limit_conn", "auth_basic", "auth_request", "allow", "deny",
+            "proxy_ssl_verify", "proxy_connect_timeout", "proxy_read_timeout", "proxy_send_timeout",
+            "root", "alias", "return",
+        )
+        tracked_settings = {name: _directive_values(block, name) for name in tracked_names if _directive_values(block, name)}
+        normalized_block = " ".join(clean.split())
+        finding_counts = {severity: sum(1 for item in findings if item["severity"] == severity)
+                          for severity in ("critical", "high", "medium", "low")}
+        controls = sorted({item["control"] for item in findings})
+        canonical = {
+            "server_names": sorted(names), "listen": sorted(listens), "tls": tls,
+            "upstreams": sorted(upstreams), "locations": sorted(loc["path"] for loc in locations),
+            "declared_visibility": declared_zones, "tracked_settings": tracked_settings,
+            "semantic_digest": hashlib.sha256(normalized_block.encode("utf-8")).hexdigest(),
+        }
+        fingerprint = hashlib.sha256(json.dumps(canonical, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        publications.append({
+            "id": publication_id, "number": number, "source": source,
+            "line_start": content.count("\n", 0, start) + 1,
+            "server_names": names, "listen": listens, "tls": tls,
+            "upstreams": upstreams, "locations": locations,
+            "declared_visibility": declared_zones, "visibility_basis": visibility_basis,
+            "actual_visibility": [], "addresses": {},
+            "config_excerpt": block, "findings": findings, "score": score,
+            "analytics": {
+                "finding_counts": finding_counts, "controls_requiring_attention": controls,
+                "attack_surface": {"locations": len(locations), "upstreams": len(upstreams)},
+                "tracked_settings": tracked_settings,
+            },
+            "fingerprint": fingerprint, "canonical": canonical,
+        })
+    return publications
+
+
+def correlate_publications(publications, inventory, resources):
+    if not inventory:
+        return publications
+    resources_by_host = {}
+    for target in inventory.get("targets", []):
+        for url in target.get("urls", []):
+            host = urllib.parse.urlsplit(url).hostname
+            if host:
+                resources_by_host.setdefault(host.lower(), []).append(target.get("id"))
+    report_by_id = {item.get("id"): item for item in resources}
+    for publication in publications:
+        matched = set()
+        catch_all = any(name in {"_", "*", "(не задан)"} for name in publication["server_names"])
+        exact_names = {name.lower() for name in publication["server_names"] if not name.startswith("*.")}
+        suffixes = [name[1:].lower() for name in publication["server_names"] if name.startswith("*.")]
+        for host, ids in resources_by_host.items():
+            if catch_all or host in exact_names or any(host.endswith(suffix) for suffix in suffixes):
+                matched.update(ids)
+        actual = set()
+        addresses = {}
+        for resource_id in matched:
+            resource = report_by_id.get(resource_id, {})
+            actual.update(resource.get("actual_visibility", []))
+            for zone, values in resource.get("addresses", {}).items():
+                addresses.setdefault(zone, set()).update(values)
+        publication["resource_ids"] = sorted(matched)
+        publication["actual_visibility"] = sorted(actual)
+        publication["addresses"] = {zone: sorted(values) for zone, values in addresses.items()}
+    return publications
+
+
+def build_publication_baseline(publications, source):
+    records = [{"id": item["id"], "fingerprint": item["fingerprint"], "canonical": item["canonical"]}
+               for item in publications]
+    return {
+        "schema_version": 1, "kind": "nginx-publication-baseline", "created_at": now_utc(),
+        "source": source, "publications": records,
+        "baseline_fingerprint": hashlib.sha256(json.dumps(records, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
+    }
+
+
+def compare_publication_baseline(publications, baseline):
+    if not baseline:
+        return {"status": "not_compared", "added": [], "removed": [], "modified": [], "unchanged": 0}
+    if baseline.get("kind") != "nginx-publication-baseline" or baseline.get("schema_version") != 1:
+        raise ValueError("неподдерживаемый формат эталона публикаций")
+    old = {item["id"]: item for item in baseline.get("publications", [])}
+    current = {item["id"]: item for item in publications}
+    added = [current[key]["canonical"] for key in sorted(current.keys() - old.keys())]
+    removed = [old[key]["canonical"] for key in sorted(old.keys() - current.keys())]
+    modified = []
+    unchanged = 0
+    for key in sorted(current.keys() & old.keys()):
+        if current[key]["fingerprint"] == old[key].get("fingerprint"):
+            unchanged += 1
+            continue
+        before = old[key].get("canonical", {})
+        after = current[key]["canonical"]
+        fields = [{"field": field, "before": before.get(field), "after": after.get(field)}
+                  for field in sorted(set(before) | set(after)) if before.get(field) != after.get(field)]
+        modified.append({"id": key, "server_names": after.get("server_names", []), "changes": fields})
+    status = "changed" if added or removed or modified else "unchanged"
+    return {"status": status, "added": added, "removed": removed, "modified": modified, "unchanged": unchanged}
 
 
 def nginx_config(args):
