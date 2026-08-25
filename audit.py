@@ -28,6 +28,22 @@ SECURITY_HEADERS = {
     "permissions-policy": "low",
 }
 
+SECURITY_HEADER_NAMES = {name.lower() for name in SECURITY_HEADERS}
+REQUEST_CONTROLLED_VARIABLE = re.compile(
+    r"\$(?:http_[A-Za-z0-9_]+|arg_[A-Za-z0-9_]+|cookie_[A-Za-z0-9_]+|request_uri|uri|host)",
+    re.I,
+)
+
+RULE_REFERENCES = {
+    "publication-dynamic-upstream-ssrf": [{"title": "Gixy: SSRF", "url": "https://github.com/yandex/gixy/blob/master/docs/en/plugins/ssrf.md"}],
+    "publication-host-header-spoofing": [{"title": "Gixy: Host spoofing", "url": "https://github.com/yandex/gixy/blob/master/docs/en/plugins/hostspoofing.md"}],
+    "publication-http-splitting": [{"title": "Gixy: HTTP splitting", "url": "https://github.com/yandex/gixy/blob/master/docs/en/plugins/httpsplitting.md"}],
+    "publication-add-header-shadow": [{"title": "NGINX: add_header inheritance", "url": "https://nginx.org/en/docs/http/ngx_http_headers_module.html#add_header"}],
+    "publication-alias-traversal": [{"title": "Gixy: alias traversal", "url": "https://github.com/yandex/gixy/blob/master/docs/en/plugins/aliastraversal.md"}],
+    "publication-incomplete-acl": [{"title": "NGINX: access module", "url": "https://nginx.org/en/docs/http/ngx_http_access_module.html"}],
+    "publication-unsafe-valid-referers": [{"title": "Gixy: valid_referers", "url": "https://github.com/yandex/gixy/blob/master/docs/en/plugins/validreferers.md"}],
+}
+
 REMEDIATIONS = {
     "nginx-version-disclosure": "Добавьте server_tokens off; в контекст http и проверьте, что upstream не раскрывает свою версию.",
     "nginx-server-tokens": "Добавьте server_tokens off; в контекст http.",
@@ -212,6 +228,8 @@ def finding(severity, rule, resource, message, evidence=None):
     if recommendation is None:
         recommendation = "Подтвердите отклонение владельцем ресурса, устраните первопричину и выполните повторную проверку."
     value["recommendation"] = recommendation
+    if rule in RULE_REFERENCES:
+        value["references"] = RULE_REFERENCES[rule]
     return value
 
 
@@ -406,7 +424,9 @@ def analyze_nginx_text(content, source="uploaded-nginx-config"):
 
 def _named_block_ranges(content, name):
     """Return ranges for named Nginx blocks, ignoring comments and quoted braces."""
-    starts = {match.end() - 1: match.start() for match in re.finditer(r"\b" + re.escape(name) + r"\s*\{", content)}
+    starts = {match.end() - 1: match.start() for match in re.finditer(
+        r"\b" + re.escape(name) + r"\b[^\{;]*\{", content, re.I
+    )}
     stack = []
     ranges = []
     quoted = None
@@ -435,6 +455,20 @@ def _named_block_ranges(content, name):
             if named_start is not None:
                 ranges.append((named_start, opening, index + 1))
     return sorted(ranges)
+
+
+def _mask_named_blocks(content, name):
+    """Blank nested named blocks while preserving offsets and line numbers."""
+    masked = list(content)
+    for start, _, end in _named_block_ranges(content, name):
+        for index in range(start, end):
+            if masked[index] != "\n":
+                masked[index] = " "
+    return "".join(masked)
+
+
+def _header_names(values):
+    return {value.split()[0].lower() for value in values if value.split()}
 
 
 def build_corrected_nginx_config(content):
@@ -501,6 +535,35 @@ def build_corrected_nginx_config(content):
             directive = "\n        # NGINX Scope: явный набор заголовков для корректного наследования.\n" + "\n".join(additions) + "\n"
             fixed = fixed[:opening + 1] + directive + fixed[opening + 1:]
 
+    # A location-level add_header normally replaces inherited add_header values.
+    # Repeat only the conservative security baseline so the corrected config does
+    # not lose headers after it is uploaded for a second audit.
+    server_ranges = _named_block_ranges(fixed, "server")
+    for _, opening, end in reversed(_named_block_ranges(fixed, "location")):
+        location_block = fixed[opening:end]
+        location_clean = "\n".join(strip_comments(line) for line in location_block.splitlines())
+        if not re.search(r"\badd_header\s+", location_clean, re.I):
+            continue
+        parent = next((fixed[s_start:s_end] for s_start, _, s_end in server_ranges
+                       if s_start <= opening and end <= s_end), "")
+        parent_clean = "\n".join(strip_comments(line) for line in parent.splitlines())
+        is_tls = bool(re.search(r"\blisten\s+[^;]*(?:443|\bssl\b)[^;]*;|\bssl_certificate\s+", parent_clean, re.I))
+        additions = []
+        headers = [
+            ("X-Content-Type-Options", '"nosniff"'),
+            ("Referrer-Policy", '"strict-origin-when-cross-origin"'),
+            ("Permissions-Policy", '"geolocation=(), camera=(), microphone=()"'),
+        ]
+        if is_tls:
+            headers.insert(0, ("Strict-Transport-Security", '"max-age=31536000"'))
+        for header, value in headers:
+            if not re.search(r"\badd_header\s+" + re.escape(header) + r"\b", location_clean, re.I):
+                additions.append(f"            add_header {header} {value} always;")
+        if additions:
+            directive = "\n            # NGINX Scope: location не теряет защитные заголовки родителя.\n" + "\n".join(additions) + "\n"
+            fixed = fixed[:opening + 1] + directive + fixed[opening + 1:]
+            applied.extend(directive.strip() for directive in additions)
+
     clean = "\n".join(strip_comments(line) for line in fixed.splitlines())
     http_ranges = _named_block_ranges(fixed, "http")
     if http_ranges and not re.search(r"\blisten\s+[^;]*\bdefault_server\b", clean):
@@ -515,7 +578,7 @@ def build_corrected_nginx_config(content):
 def _directive_values(content, name):
     clean = "\n".join(strip_comments(line) for line in content.splitlines())
     return [" ".join(match.group(1).split()) for match in re.finditer(
-        r"(?:^|[;{}]\s*)" + re.escape(name) + r"\s+([^;]+);", clean, re.I | re.M
+        r"(?:^|(?<=[;{}]))\s*" + re.escape(name) + r"\s+([^;]+);", clean, re.I | re.M
     )]
 
 
@@ -734,6 +797,14 @@ def build_publication_summary(publication):
 def extract_publications(content, source="uploaded-nginx-config"):
     """Build a per-server publication inventory and targeted security analytics."""
     publications = []
+    http_parent_headers = set()
+    http_inherit_merge = False
+    http_ranges = _named_block_ranges(content, "http")
+    if http_ranges:
+        http_start, _, http_end = http_ranges[0]
+        http_scope = _mask_named_blocks(content[http_start:http_end], "server")
+        http_parent_headers = _header_names(_directive_values(http_scope, "add_header"))
+        http_inherit_merge = bool(re.search(r"\badd_header_inherit\s+merge\s*;", http_scope, re.I))
     for number, (start, opening, end) in enumerate(_named_block_ranges(content, "server"), 1):
         block = content[start:end].strip()
         listens = _directive_values(block, "listen") or ["80 (implicit)"]
@@ -758,6 +829,98 @@ def extract_publications(content, source="uploaded-nginx-config"):
             and not upstreams
         )
         findings = []
+
+        # Gixy-derived data-flow checks. They intentionally target only
+        # request-controlled variables in security-sensitive positions.
+        for value in _directive_values(block, "proxy_pass"):
+            match = re.match(r"https?://([^/]+)", value, re.I)
+            authority = match.group(1) if match else ""
+            if authority and REQUEST_CONTROLLED_VARIABLE.search(authority):
+                findings.append(_publication_finding("high", "publication-dynamic-upstream-ssrf", publication_id,
+                    "Адрес upstream управляется данными HTTP-запроса",
+                    "Не подставляйте $host, $http_* или $arg_* в адрес proxy_pass. Выбирайте статический upstream через map с закрытым default и allowlist допустимых значений.",
+                    "SSRF / КК", value))
+
+        for value in _directive_values(block, "proxy_set_header"):
+            if re.match(r"Host\s+\$http_host(?:\s|$)", value, re.I):
+                findings.append(_publication_finding("high", "publication-host-header-spoofing", publication_id,
+                    "В upstream передаётся непроверенный заголовок Host клиента",
+                    "Замените $http_host на фиксированное имя upstream или на $host только при строгих server_name и защитном default_server.",
+                    "ЗВТ.3 / Host", value))
+
+        splitting_evidence = []
+        for directive in ("add_header", "return", "rewrite"):
+            for value in _directive_values(block, directive):
+                sensitive_sink = (
+                    directive == "add_header"
+                    or (directive == "return" and re.match(r"30[1278]\s+", value))
+                    or (directive == "rewrite" and re.search(r"\s(?:redirect|permanent)\s*$", value, re.I))
+                )
+                if sensitive_sink and REQUEST_CONTROLLED_VARIABLE.search(value):
+                    splitting_evidence.append(f"{directive} {value}")
+        if splitting_evidence:
+            findings.append(_publication_finding("high", "publication-http-splitting", publication_id,
+                "Данные запроса используются при формировании заголовка или перенаправления",
+                "Не отражайте $http_*, $arg_*, $cookie_* и URI-переменные в add_header/redirect. Используйте строгий map/allowlist либо фиксированное значение.",
+                "HTTP splitting / КК", "; ".join(splitting_evidence[:3])))
+
+        server_scope = _mask_named_blocks(block, "location")
+        server_headers = _header_names(_directive_values(server_scope, "add_header"))
+        server_inherit_merge = http_inherit_merge or bool(re.search(r"\badd_header_inherit\s+merge\s*;", server_scope, re.I))
+        parent_headers = (http_parent_headers | server_headers) if server_inherit_merge or not server_headers else server_headers
+        parent_security_headers = parent_headers & SECURITY_HEADER_NAMES
+        hidden_at_server = sorted((http_parent_headers & SECURITY_HEADER_NAMES) - server_headers)
+        if server_headers and hidden_at_server and not server_inherit_merge:
+            findings.append(_publication_finding("medium", "publication-add-header-shadow", publication_id,
+                "Блок server перекрывает защитные заголовки уровня http",
+                "Повторите в server весь требуемый набор add_header с always. add_header_inherit merge допустим только после подтверждения Nginx 1.29.3+.",
+                "ЗВТ.3 / headers", ", ".join(hidden_at_server)))
+
+        server_allows = _directive_values(server_scope, "allow")
+        server_denies = [value.lower() for value in _directive_values(server_scope, "deny")]
+        if server_allows and "all" not in server_denies:
+            findings.append(_publication_finding("medium", "publication-incomplete-acl", publication_id,
+                "В блоке server есть allow без завершающего deny all",
+                "Завершите IP-allowlist директивой deny all и проверьте порядок правил. Если доступ должен быть открытым, удалите вводящий в заблуждение allow.",
+                "УПД / ACL", ", ".join(server_allows)))
+        for location in locations:
+            location_clean = "\n".join(strip_comments(line) for line in location["config_excerpt"].splitlines())
+            location_headers = _header_names(_directive_values(location_clean, "add_header"))
+            inherit_merge = server_inherit_merge or bool(re.search(r"\badd_header_inherit\s+merge\s*;", location_clean, re.I))
+            hidden_headers = sorted(parent_security_headers - location_headers)
+            if location_headers and hidden_headers and not inherit_merge:
+                findings.append(_publication_finding("medium", "publication-add-header-shadow", publication_id,
+                    f"location {location['path']} перекрывает защитные заголовки родителя",
+                    "Повторите в location весь требуемый набор add_header с always. add_header_inherit merge допустим только после подтверждения Nginx 1.29.3+.",
+                    "ЗВТ.3 / headers", ", ".join(hidden_headers)))
+
+            aliases = _directive_values(location_clean, "alias")
+            match_type = location.get("explanation", {}).get("match_type")
+            raw_path = re.sub(r"^(?:=|\^~)\s+", "", location["path"].strip())
+            if match_type in {"Префиксный маршрут", "Точное совпадение", "Приоритетный префикс"}:
+                for alias in aliases:
+                    if raw_path and not raw_path.endswith("/") and alias.rstrip().endswith("/"):
+                        findings.append(_publication_finding("high", "publication-alias-traversal", publication_id,
+                            f"Несогласованные завершающие / в location {location['path']} и alias",
+                            "Согласуйте завершающий / у префикса location и каталога alias либо используйте root; затем проверьте граничные URI и nginx -t.",
+                            "Path traversal / КК", f"location {location['path']}; alias {alias}"))
+
+            allows = _directive_values(location_clean, "allow")
+            denies = [value.lower() for value in _directive_values(location_clean, "deny")]
+            if allows and "all" not in denies:
+                findings.append(_publication_finding("medium", "publication-incomplete-acl", publication_id,
+                    f"В location {location['path']} есть allow без завершающего deny all",
+                    "Завершите IP-allowlist директивой deny all и проверьте порядок правил. Если доступ должен быть открытым, удалите вводящий в заблуждение allow.",
+                    "УПД / ACL", ", ".join(allows)))
+
+        for value in _directive_values(block, "valid_referers"):
+            tokens = {token.lower() for token in value.split()}
+            unsafe = sorted(tokens & {"none", "blocked"})
+            if unsafe:
+                findings.append(_publication_finding("medium", "publication-unsafe-valid-referers", publication_id,
+                    "Проверка Referer разрешает отсутствующее или нестандартное значение",
+                    "Не используйте Referer как единственный механизм авторизации или CSRF-защиты. Удалите none/blocked, если запросы без доверенного Referer должны отклоняться.",
+                    "CSRF / КК", " ".join(unsafe)))
 
         if external_possible and not tls and not reject_only:
             findings.append(_publication_finding("high", "publication-cleartext", publication_id,
@@ -805,6 +968,10 @@ def extract_publications(content, source="uploaded-nginx-config"):
                 "Не найдены явные timeout для reverse proxy",
                 "Задайте минимально достаточные proxy_connect_timeout, proxy_read_timeout и proxy_send_timeout по SLA.", "ЗОО.5"))
 
+        line_start = content.count("\n", 0, start) + 1
+        for item in findings:
+            item.setdefault("source", source)
+            item.setdefault("line", line_start)
         score = max(0, 100 - sum({"critical": 24, "high": 14, "medium": 6, "low": 2}.get(x["severity"], 0) for x in findings))
         tracked_names = (
             "ssl_protocols", "ssl_ciphers", "access_log", "error_log", "client_max_body_size",
@@ -827,7 +994,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
         fingerprint = hashlib.sha256(json.dumps(canonical, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         publication = {
             "id": publication_id, "number": number, "source": source,
-            "line_start": content.count("\n", 0, start) + 1,
+            "line_start": line_start,
             "server_names": names, "listen": listens, "tls": tls,
             "publication_type": "protective_default" if reject_only else "application",
             "upstreams": upstreams, "locations": locations,
