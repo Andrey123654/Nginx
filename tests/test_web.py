@@ -12,8 +12,8 @@ def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.0.3"
-    assert response.headers["x-nginx-scope-version"] == "1.0.3"
+    assert response.json()["version"] == "1.0.4"
+    assert response.headers["x-nginx-scope-version"] == "1.0.4"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -49,6 +49,17 @@ def test_arbitrary_extension_is_accepted_for_text_config():
         "nginx_config": ("nginx.yaml", b"events {}", "text/plain")
     })
     assert response.status_code == 200
+
+
+def test_config_only_with_empty_optional_uploads_is_accepted():
+    response = client.post("/api/analyze", files={
+        "nginx_config": ("nginx.conf", b"events {} http { server_tokens off; }", "text/plain"),
+        "inventory": ("", b"", "application/octet-stream"),
+        "external_sensor": ("", b"", "application/octet-stream"),
+        "internal_sensor": ("", b"", "application/octet-stream"),
+    })
+    assert response.status_code == 200
+    assert response.json()["resources"] == []
 
 
 def test_sensor_requires_inventory():
