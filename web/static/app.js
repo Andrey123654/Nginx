@@ -7,7 +7,7 @@ let currentReport = null;
 
 function setConfigLabel(file) {
   document.querySelector('#config-title').textContent = file ? file.name : 'Загрузите nginx.conf';
-  document.querySelector('#config-meta').textContent = file ? `${(file.size / 1024).toFixed(1)} КБ · готов к проверке` : 'или вывод nginx -T · UTF-8 · до 5 МБ';
+  document.querySelector('#config-meta').textContent = file ? `${(file.size / 1024).toFixed(1)} КБ · готов к проверке` : 'или вывод nginx -T, в том числе без расширения · UTF-8 · до 5 МБ';
   dropzone.classList.toggle('selected', Boolean(file));
 }
 
@@ -77,4 +77,3 @@ document.querySelector('#export-csv').addEventListener('click', () => {
   const rows = [['severity','rule','resource','message','evidence'], ...currentReport.findings.map(x => [x.severity,x.rule,x.resource,x.message,x.evidence || ''])];
   download('nginx-scope-findings.csv','text/csv;charset=utf-8','\ufeff' + rows.map(row => row.map(quote).join(',')).join('\n'));
 });
-
