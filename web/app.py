@@ -22,11 +22,12 @@ from audit import (
     validate_inventory,
 )
 from web.pdf_report import generate_pdf_report
+from web.sarif_report import generate_sarif_report
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
@@ -35,7 +36,7 @@ ALLOWED_JSON_SUFFIXES = {".json"}
 app = FastAPI(
     title="NGINX Scope",
     description="Аудит конфигураций Nginx и областей сетевой видимости",
-    version="1.4.0",
+    version="1.5.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -156,6 +157,7 @@ def build_report(config_findings, inventory=None, sensors=None, corrected_config
             "CIS NGINX Benchmark 3.0.0",
             "NIST SP 800-128",
             "OWASP Web Security Testing Guide",
+            "Gixy и Gixy-Next: классы статических проверок конфигурации",
             "официальная документация Nginx и TLSRef",
         ],
         "privacy": "Исходный и исправленный конфиги возвращаются только в текущий ответ и не сохраняются на сервере",
@@ -189,6 +191,19 @@ async def export_pdf(report: dict = Body(...)):
         raise HTTPException(status_code=422, detail="Не удалось сформировать PDF: " + str(exc)) from exc
     return Response(content, media_type="application/pdf", headers={
         "Content-Disposition": 'attachment; filename="nginx-scope-report.pdf"',
+        "Cache-Control": "no-store",
+    })
+
+
+@app.post("/api/export/sarif", include_in_schema=False)
+async def export_sarif(report: dict = Body(...)):
+    if report.get("schema_version") != SCHEMA_VERSION or not isinstance(report.get("findings", []), list):
+        raise HTTPException(status_code=422, detail="Некорректный формат отчёта для экспорта SARIF")
+    if len(json.dumps(report, ensure_ascii=False)) > 16 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Отчёт слишком большой для экспорта SARIF")
+    content = generate_sarif_report(report)
+    return Response(content, media_type="application/sarif+json", headers={
+        "Content-Disposition": 'attachment; filename="nginx-scope-results.sarif"',
         "Cache-Control": "no-store",
     })
 
