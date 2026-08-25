@@ -13,8 +13,8 @@ def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.4.0"
-    assert response.headers["x-nginx-scope-version"] == "1.4.0"
+    assert response.json()["version"] == "1.5.0"
+    assert response.headers["x-nginx-scope-version"] == "1.5.0"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -61,6 +61,21 @@ def test_full_pdf_export():
     assert "nginx-scope-report.pdf" in response.headers["content-disposition"]
     assert response.content.startswith(b"%PDF-")
     assert len(response.content) > 5000
+
+
+def test_sarif_export_for_ci_cd():
+    config = b"events {} http { server { listen 80; server_name app.example; location / { proxy_pass http://$arg_target; } } }"
+    report = client.post("/api/analyze", files={"nginx_config": ("nginx.conf", config, "text/plain")}).json()
+    report.pop("corrected_config", None)
+    response = client.post("/api/export/sarif", json=report)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/sarif+json")
+    payload = response.json()
+    assert payload["version"] == "2.1.0"
+    assert payload["runs"][0]["tool"]["driver"]["version"] == "1.5.0"
+    result = next(item for item in payload["runs"][0]["results"] if item["ruleId"] == "publication-dynamic-upstream-ssrf")
+    assert result["level"] == "error"
+    assert result["locations"][0]["physicalLocation"]["region"]["startLine"] > 0
 
 
 def test_binary_file_is_rejected():
