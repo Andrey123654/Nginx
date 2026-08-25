@@ -2,7 +2,7 @@ FROM ubuntu:26.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl python3 python3-pip python3-venv \
+    && apt-get install -y --no-install-recommends ca-certificates curl fonts-dejavu-core python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 nginxscope \
     && useradd --system --uid 10001 --gid nginxscope --home /app --shell /usr/sbin/nologin nginxscope
