@@ -126,6 +126,9 @@ def _finding_card(item, styles):
     ]
     if item.get("evidence"):
         content.append(Paragraph(f"Свидетельство: {_text(item['evidence'])}", styles["small"]))
+    if item.get("references"):
+        sources = "; ".join(f"{ref.get('title')}: {ref.get('url')}" for ref in item["references"])
+        content.append(Paragraph(f"Основание: {_text(sources)}", styles["small"]))
     table = Table([[Paragraph(_text(severity_label), styles["severity"]), content]], colWidths=[22 * mm, 150 * mm])
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (0, 0), _severity_color(severity)),
