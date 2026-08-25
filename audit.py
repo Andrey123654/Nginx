@@ -483,10 +483,23 @@ def build_corrected_nginx_config(content):
         block_clean = "\n".join(strip_comments(line) for line in block.splitlines())
         is_tls = bool(re.search(r"\blisten\s+[^;]*(?:443|\bssl\b)[^;]*;|\bssl_certificate\s+", block_clean, re.I))
         has_hsts = bool(re.search(r"\badd_header\s+Strict-Transport-Security\b", block_clean, re.I))
+        additions = []
         if is_tls and not has_hsts:
-            directive = '\n        # NGINX Scope: HSTS только для HTTPS.\n        add_header Strict-Transport-Security "max-age=31536000" always;\n'
-            fixed = fixed[:opening + 1] + directive + fixed[opening + 1:]
+            additions.append('        add_header Strict-Transport-Security "max-age=31536000" always;')
             applied.append('add_header Strict-Transport-Security "max-age=31536000" always;')
+        # In Nginx versions without add_header_inherit merge, one server-level add_header
+        # cancels inheritance of every add_header from http. Repeat the safe baseline.
+        if is_tls or re.search(r"\badd_header\s+", block_clean, re.I):
+            for header, value in (
+                ("X-Content-Type-Options", '"nosniff"'),
+                ("Referrer-Policy", '"strict-origin-when-cross-origin"'),
+                ("Permissions-Policy", '"geolocation=(), camera=(), microphone=()"'),
+            ):
+                if not re.search(r"\badd_header\s+" + re.escape(header) + r"\b", block_clean, re.I):
+                    additions.append(f"        add_header {header} {value} always;")
+        if additions:
+            directive = "\n        # NGINX Scope: явный набор заголовков для корректного наследования.\n" + "\n".join(additions) + "\n"
+            fixed = fixed[:opening + 1] + directive + fixed[opening + 1:]
 
     clean = "\n".join(strip_comments(line) for line in fixed.splitlines())
     http_ranges = _named_block_ranges(fixed, "http")
@@ -613,13 +626,18 @@ def extract_publications(content, source="uploaded-nginx-config"):
         clean = "\n".join(strip_comments(line) for line in block.splitlines())
         tls = bool(re.search(r"\blisten\s+[^;]*(?:443|\bssl\b)[^;]*;|\bssl_certificate\s+", clean, re.I))
         external_possible = "external" in declared_zones
+        reject_only = bool(
+            any("default_server" in value for value in listens)
+            and re.search(r"\breturn\s+(?:403|404|444)\s*;", clean, re.I)
+            and not upstreams
+        )
         findings = []
 
-        if external_possible and not tls:
+        if external_possible and not tls and not reject_only:
             findings.append(_publication_finding("high", "publication-cleartext", publication_id,
                 "Публикация потенциально доступна снаружи без TLS",
                 "Настройте HTTPS, перенаправляйте HTTP на HTTPS и защитите ключи/сертификаты.", "ЗКС.1", ", ".join(listens)))
-        if external_possible and any(name in {"_", "*", "(не задан)"} for name in names):
+        if external_possible and not reject_only and any(name in {"_", "*", "(не задан)"} for name in names):
             findings.append(_publication_finding("medium", "publication-wildcard-name", publication_id,
                 "Внешняя публикация принимает неопределённые имена хостов",
                 "Укажите точные server_name и вынесите неизвестные Host в отдельный default_server с отказом.", "КК / ЗВТ.3"))
@@ -636,11 +654,11 @@ def extract_publications(content, source="uploaded-nginx-config"):
                 "Для HTTPS-upstream не найдена явная проверка сертификата",
                 "Добавьте proxy_ssl_verify on, proxy_ssl_trusted_certificate и proxy_ssl_server_name on.", "ЗКС.1"))
         sensitive = any(re.search(r"(?:admin|status|metrics|debug|swagger|actuator)", loc["path"], re.I) for loc in locations)
-        if external_possible and sensitive and not re.search(r"\b(?:allow|auth_request|auth_basic)\s+", clean, re.I):
+        if external_possible and not reject_only and sensitive and not re.search(r"\b(?:allow|auth_request|auth_basic)\s+", clean, re.I):
             findings.append(_publication_finding("high", "publication-sensitive-endpoint-open", publication_id,
                 "Служебный endpoint потенциально опубликован без ограничения доступа",
                 "Ограничьте endpoint сетевым allowlist и сильной аутентификацией; предпочтительно вынесите во внутренний vhost.", "УПД / ЗВТ.2"))
-        if external_possible and not re.search(r"\blimit_req\s+", clean, re.I):
+        if external_possible and not reject_only and not re.search(r"\blimit_req\s+", clean, re.I):
             findings.append(_publication_finding("low", "publication-rate-limit-missing", publication_id,
                 "Не найдено ограничение частоты запросов для внешней публикации",
                 "Настройте limit_req_zone/limit_req по профилю нагрузки либо зафиксируйте эквивалентную защиту на WAF/LB.", "ЗОО.5"))
@@ -648,7 +666,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
             findings.append(_publication_finding("medium", "publication-unlimited-body", publication_id,
                 "Размер тела запроса не ограничен",
                 "Установите минимально необходимый client_max_body_size и согласуйте лимит с приложением.", "ЗОО.5", "client_max_body_size 0"))
-        if external_possible and any(value.startswith("http://") for value in upstreams):
+        if external_possible and not reject_only and any(value.startswith("http://") for value in upstreams):
             findings.append(_publication_finding("low", "publication-cleartext-upstream", publication_id,
                 "Данные передаются к upstream по HTTP",
                 "Если upstream проходит через недоверенный сегмент, используйте HTTPS/mTLS; иначе документируйте границу доверия и сегментацию.", "ЗКС.1"))
@@ -656,7 +674,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
             findings.append(_publication_finding("critical", "publication-embedded-credentials", publication_id,
                 "В proxy_pass обнаружены встроенные учётные данные",
                 "Немедленно отзовите секрет, удалите его из конфигурации и истории, используйте защищённое хранилище секретов.", "ИАФ / КК"))
-        if external_possible and upstreams and not re.search(r"\bproxy_(?:connect|read|send)_timeout\s+", clean, re.I):
+        if external_possible and not reject_only and upstreams and not re.search(r"\bproxy_(?:connect|read|send)_timeout\s+", clean, re.I):
             findings.append(_publication_finding("low", "publication-timeouts-missing", publication_id,
                 "Не найдены явные timeout для reverse proxy",
                 "Задайте минимально достаточные proxy_connect_timeout, proxy_read_timeout и proxy_send_timeout по SLA.", "ЗОО.5"))
@@ -675,6 +693,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
         controls = sorted({item["control"] for item in findings})
         canonical = {
             "server_names": sorted(names), "listen": sorted(listens), "tls": tls,
+            "publication_type": "protective_default" if reject_only else "application",
             "upstreams": sorted(upstreams), "locations": sorted(loc["path"] for loc in locations),
             "declared_visibility": declared_zones, "tracked_settings": tracked_settings,
             "semantic_digest": hashlib.sha256(normalized_block.encode("utf-8")).hexdigest(),
@@ -684,6 +703,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
             "id": publication_id, "number": number, "source": source,
             "line_start": content.count("\n", 0, start) + 1,
             "server_names": names, "listen": listens, "tls": tls,
+            "publication_type": "protective_default" if reject_only else "application",
             "upstreams": upstreams, "locations": locations,
             "declared_visibility": declared_zones, "visibility_basis": visibility_basis,
             "actual_visibility": [], "addresses": {},
