@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from audit import (
@@ -21,11 +21,12 @@ from audit import (
     now_utc,
     validate_inventory,
 )
+from web.pdf_report import generate_pdf_report
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.4.0"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
@@ -34,7 +35,7 @@ ALLOWED_JSON_SUFFIXES = {".json"}
 app = FastAPI(
     title="NGINX Scope",
     description="Аудит конфигураций Nginx и областей сетевой видимости",
-    version="1.2.2",
+    version="1.4.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -174,6 +175,22 @@ async def healthz():
         "version": APP_VERSION,
         "config_upload": "any UTF-8 text filename, max 5 MiB",
     }
+
+
+@app.post("/api/export/pdf", include_in_schema=False)
+async def export_pdf(report: dict = Body(...)):
+    if report.get("schema_version") != SCHEMA_VERSION or not isinstance(report.get("publications", []), list):
+        raise HTTPException(status_code=422, detail="Некорректный формат отчёта для экспорта PDF")
+    if len(json.dumps(report, ensure_ascii=False)) > 16 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Отчёт слишком большой для экспорта PDF")
+    try:
+        content = generate_pdf_report(report)
+    except (RuntimeError, ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail="Не удалось сформировать PDF: " + str(exc)) from exc
+    return Response(content, media_type="application/pdf", headers={
+        "Content-Disposition": 'attachment; filename="nginx-scope-report.pdf"',
+        "Cache-Control": "no-store",
+    })
 
 
 @app.post("/api/analyze", include_in_schema=False)
