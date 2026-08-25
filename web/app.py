@@ -25,7 +25,7 @@ from audit import (
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
@@ -34,7 +34,7 @@ ALLOWED_JSON_SUFFIXES = {".json"}
 app = FastAPI(
     title="NGINX Scope",
     description="Аудит конфигураций Nginx и областей сетевой видимости",
-    version="1.2.0",
+    version="1.2.1",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
