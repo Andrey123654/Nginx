@@ -20,7 +20,7 @@ from audit import (
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
@@ -63,7 +63,7 @@ def upload_rejection(status_code, code, message, upload=None, hint=None):
 
 
 async def read_upload(upload: UploadFile, allowed_suffixes=None, required=True, allow_no_suffix=False):
-    if upload is None:
+    if upload is None or not upload.filename:
         if required:
             raise upload_rejection(400, "file_missing", "Обязательный файл не передан",
                                    hint="Выберите файл конфигурации Nginx и повторите проверку")
