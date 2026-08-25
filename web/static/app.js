@@ -55,7 +55,14 @@ form.addEventListener('submit', async event => {
   const button = form.querySelector('.run'); const label = document.querySelector('#run-label');
   button.disabled = true; label.textContent = 'Анализируем…';
   try {
-    const response = await fetch('/api/analyze', {method:'POST', body:new FormData(form)});
+    const payload = new FormData();
+    const configFile = configInput.files[0];
+    if (configFile) payload.append('nginx_config', configFile);
+    for (const field of ['inventory', 'external_sensor', 'internal_sensor']) {
+      const optionalFile = form.elements[field].files[0];
+      if (optionalFile) payload.append(field, optionalFile);
+    }
+    const response = await fetch('/api/analyze', {method:'POST', body:payload});
     const body = await response.text();
     let data = null;
     try { data = body ? JSON.parse(body) : null; } catch (_) { data = null; }
