@@ -37,6 +37,7 @@ function render(report) {
   document.querySelector('#findings-body').innerHTML = report.findings.map(item => `<tr>
     <td><span class="badge ${esc(item.severity)}">${esc(severityName(item.severity))}</span></td>
     <td><b>${esc(item.message)}</b><small>${esc(item.rule)}</small></td>
+    <td class="recommendation">${esc(item.recommendation || 'Требуется анализ владельцем ресурса')}</td>
     <td class="mono">${esc(item.resource)}</td><td class="evidence">${esc(item.evidence || '—')}</td></tr>`).join('');
   document.querySelector('#findings-empty').hidden = report.findings.length > 0;
 
@@ -97,10 +98,15 @@ document.querySelectorAll('.tabs button').forEach(button => button.addEventListe
 }));
 
 function download(name, type, content) { const blob = new Blob([content], {type}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url); }
-document.querySelector('#export-json').addEventListener('click', () => currentReport && download('nginx-scope-report.json','application/json',JSON.stringify(currentReport,null,2)));
+document.querySelector('#export-fixed').addEventListener('click', () => currentReport?.corrected_config && download('nginx.corrected.conf','text/plain;charset=utf-8',currentReport.corrected_config));
+document.querySelector('#export-json').addEventListener('click', () => {
+  if (!currentReport) return;
+  const {corrected_config, ...reportWithoutConfig} = currentReport;
+  download('nginx-scope-report.json','application/json',JSON.stringify(reportWithoutConfig,null,2));
+});
 document.querySelector('#export-csv').addEventListener('click', () => {
   if (!currentReport) return;
   const quote = value => `"${String(value ?? '').replaceAll('"','""')}"`;
-  const rows = [['severity','rule','resource','message','evidence'], ...currentReport.findings.map(x => [x.severity,x.rule,x.resource,x.message,x.evidence || ''])];
+  const rows = [['severity','rule','resource','message','recommendation','evidence'], ...currentReport.findings.map(x => [x.severity,x.rule,x.resource,x.message,x.recommendation || '',x.evidence || ''])];
   download('nginx-scope-findings.csv','text/csv;charset=utf-8','\ufeff' + rows.map(row => row.map(quote).join(',')).join('\n'));
 });
