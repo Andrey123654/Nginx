@@ -14,7 +14,14 @@ PUBLIC_ORIGIN=https://scope.example.org docker compose up -d
 curl --fail http://127.0.0.1:8080/healthz
 ```
 
-Контейнер запускается без root, с read-only filesystem, без Linux capabilities и слушает только localhost хоста. Скопируйте `deploy/nginx-scope.conf.example` в `/etc/nginx/sites-available/nginx-scope`, замените домен и пути сертификатов, затем включите сайт:
+Контейнер запускается без root, с read-only filesystem и без Linux capabilities. Порт `8080` публикуется на всех интерфейсах. До запуска ограничьте доступ доверенной корпоративной подсетью (пример для `10.20.0.0/16`):
+
+```bash
+sudo ufw allow from 10.20.0.0/16 to any port 8080 proto tcp
+sudo ufw deny 8080/tcp
+```
+
+Для production предпочтителен HTTPS reverse proxy. Скопируйте `deploy/nginx-scope.conf.example` в `/etc/nginx/sites-available/nginx-scope`, замените домен и пути сертификатов, затем включите сайт:
 
 ```bash
 sudo ln -s /etc/nginx/sites-available/nginx-scope /etc/nginx/sites-enabled/nginx-scope
@@ -32,6 +39,8 @@ curl --fail http://127.0.0.1:8080/healthz
 ```
 
 Скрипт прекращает работу, если ОС отличается от Ubuntu 26.04. Он создаёт непривилегированного пользователя `nginxscope`, виртуальное окружение и hardened systemd unit. Перед production-запуском замените `PUBLIC_ORIGIN` в `/etc/systemd/system/nginx-scope.service` на реальный HTTPS origin и выполните `sudo systemctl daemon-reload && sudo systemctl restart nginx-scope`. TLS reverse proxy настраивается отдельно по примеру выше.
+
+Systemd-сервис запускает Uvicorn с `--host 0.0.0.0 --port 8080`. Для обращения с другой машины используйте `http://<IP-СЕРВЕРА>:8080` и убедитесь, что firewall/security group разрешает входящий TCP/8080 только из доверенных сетей.
 
 ## Обновление
 
