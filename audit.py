@@ -27,6 +27,26 @@ SECURITY_HEADERS = {
     "permissions-policy": "low",
 }
 
+REMEDIATIONS = {
+    "nginx-version-disclosure": "Добавьте server_tokens off; в контекст http и проверьте, что upstream не раскрывает свою версию.",
+    "nginx-server-tokens": "Добавьте server_tokens off; в контекст http.",
+    "nginx-old-tls": "Оставьте только ssl_protocols TLSv1.2 TLSv1.3; и проверьте совместимость клиентов.",
+    "nginx-tls-policy-missing": "Явно задайте ssl_protocols TLSv1.2 TLSv1.3; в контексте http.",
+    "nginx-autoindex": "Отключите листинг директивой autoindex off; и публикуйте только необходимые файлы.",
+    "nginx-open-status": "Ограничьте location со stub_status: allow <CIDR мониторинга>; deny all; либо слушайте отдельный внутренний интерфейс.",
+    "nginx-hsts": "В HTTPS-сервере добавьте Strict-Transport-Security с always. includeSubDomains/preload включайте только после проверки всех поддоменов.",
+    "nginx-header-x-content-type-options": "Добавьте add_header X-Content-Type-Options \"nosniff\" always;.",
+    "nginx-header-content-security-policy": "Сформируйте CSP по фактическим источникам приложения; начните с режима Content-Security-Policy-Report-Only.",
+    "nginx-header-referrer-policy": "Добавьте add_header Referrer-Policy \"strict-origin-when-cross-origin\" always;.",
+    "nginx-header-permissions-policy": "Запретите неиспользуемые API, например add_header Permissions-Policy \"geolocation=(), camera=(), microphone=()\" always;.",
+    "nginx-alias-traversal": "Используйте согласованные завершающие / в location и alias либо замените alias на root; отдельно проверьте нормализацию URI.",
+    "nginx-no-default-server": "Добавьте отдельный default_server с server_name _; и return 444;, чтобы неизвестные Host не попадали в рабочий виртуальный хост.",
+    "unsafe-cors": "Не сочетайте Access-Control-Allow-Origin: * с credentials; задайте точный allowlist доверенных origin.",
+    "address-drift": "Сверьте DNS/LB/NAT с утверждёнными CIDR и обновите публикацию либо согласованный реестр после проверки владельцем.",
+    "unexpected-exposure": "Закройте маршрут, listener или правило firewall из лишней зоны и повторите проверку соответствующим датчиком.",
+    "missing-exposure": "Проверьте DNS, listener, маршрут и firewall требуемой зоны, затем повторите проверку датчиком.",
+}
+
 
 class SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Do not let an allowlisted URL redirect the scanner to a third party."""
@@ -181,6 +201,16 @@ def finding(severity, rule, resource, message, evidence=None):
     value = {"severity": severity, "rule": rule, "resource": resource, "message": message}
     if evidence:
         value["evidence"] = evidence
+    recommendation = REMEDIATIONS.get(rule)
+    if recommendation is None and rule.startswith("missing-header-"):
+        recommendation = "Добавьте отсутствующий защитный HTTP-заголовок с директивой add_header и параметром always; значение проверьте по модели приложения."
+    if recommendation is None and rule.startswith("testssl:"):
+        recommendation = "Исправьте TLS-настройку по выводу testssl.sh, проверьте совместимость клиентов и повторите сканирование."
+    if recommendation is None and rule.startswith("zap:"):
+        recommendation = "Подтвердите замечание OWASP ZAP, устраните его в приложении или reverse proxy и выполните повторную проверку."
+    if recommendation is None:
+        recommendation = "Подтвердите отклонение владельцем ресурса, устраните первопричину и выполните повторную проверку."
+    value["recommendation"] = recommendation
     return value
 
 
@@ -371,6 +401,101 @@ def analyze_nginx_text(content, source="uploaded-nginx-config"):
         add("low", "nginx-no-default-server", "Не найден явный default_server/catch-all")
     findings.sort(key=lambda x: (-SEVERITY_ORDER.get(x["severity"], 0), x["rule"]))
     return findings
+
+
+def _named_block_ranges(content, name):
+    """Return ranges for named Nginx blocks, ignoring comments and quoted braces."""
+    starts = {match.end() - 1: match.start() for match in re.finditer(r"\b" + re.escape(name) + r"\s*\{", content)}
+    stack = []
+    ranges = []
+    quoted = None
+    escaped = False
+    comment = False
+    for index, char in enumerate(content):
+        if comment:
+            if char == "\n":
+                comment = False
+            continue
+        if quoted:
+            if char == quoted and not escaped:
+                quoted = None
+            escaped = char == "\\" and not escaped
+            if char != "\\":
+                escaped = False
+            continue
+        if char == "#":
+            comment = True
+        elif char in {'"', "'"}:
+            quoted = char
+        elif char == "{":
+            stack.append((index, starts.get(index)))
+        elif char == "}" and stack:
+            opening, named_start = stack.pop()
+            if named_start is not None:
+                ranges.append((named_start, opening, index + 1))
+    return sorted(ranges)
+
+
+def build_corrected_nginx_config(content):
+    """Apply conservative hardening and return config plus changes requiring an owner."""
+    fixed = content.replace("\r\n", "\n").replace("\r", "\n")
+    fixed = re.sub(r"\bserver_tokens\s+[^;]+;", "server_tokens off;", fixed, flags=re.I)
+    fixed = re.sub(r"\bssl_protocols\s+[^;]+;", "ssl_protocols TLSv1.2 TLSv1.3;", fixed, flags=re.I)
+    fixed = re.sub(r"\bautoindex\s+on\s*;", "autoindex off;", fixed, flags=re.I)
+    clean = "\n".join(strip_comments(line) for line in fixed.splitlines())
+    http_ranges = _named_block_ranges(fixed, "http")
+    applied = []
+    manual = []
+
+    if http_ranges:
+        _, http_open, _ = http_ranges[0]
+        directives = []
+        if not re.search(r"\bserver_tokens\s+off\s*;", clean, re.I):
+            directives.append("    server_tokens off;")
+        if not re.search(r"\bssl_protocols\s+[^;]*TLSv1\.2[^;]*TLSv1\.3", clean, re.I):
+            directives.append("    ssl_protocols TLSv1.2 TLSv1.3;")
+        headers = (
+            ("X-Content-Type-Options", '"nosniff"'),
+            ("Referrer-Policy", '"strict-origin-when-cross-origin"'),
+            ("Permissions-Policy", '"geolocation=(), camera=(), microphone=()"'),
+        )
+        for header, value in headers:
+            if not re.search(r"\badd_header\s+" + re.escape(header) + r"\b", clean, re.I):
+                directives.append(f"    add_header {header} {value} always;")
+        if directives:
+            banner = "\n    # NGINX Scope: безопасные автоматические исправления; проверьте nginx -t.\n"
+            fixed = fixed[:http_open + 1] + banner + "\n".join(directives) + "\n" + fixed[http_open + 1:]
+            applied.extend(directive.strip() for directive in directives)
+    else:
+        manual.append("Не найден блок http: автоматическая вставка общих директив пропущена.")
+
+    clean = "\n".join(strip_comments(line) for line in fixed.splitlines())
+    if re.search(r"\bstub_status\s*;", clean) and not re.search(r"\ballow\s+(?:127\.0\.0\.1|::1|unix:)", clean):
+        manual.append("Укажите доверенный CIDR мониторинга для stub_status и завершите allowlist директивой deny all;.")
+    if re.search(r"location\s+[^\{]*\.\.?[^\{]*\{[^}]*\balias\s+", clean, re.S):
+        manual.append("Проверьте найденную пару location/alias вручную: автоматическая смена путей может нарушить маршрутизацию.")
+    if not re.search(r"\badd_header\s+Content-Security-Policy\b", clean, re.I):
+        manual.append("Настройте Content-Security-Policy по реальным источникам приложения, сначала в режиме Report-Only.")
+
+    for _, opening, end in reversed(_named_block_ranges(fixed, "server")):
+        block = fixed[opening:end]
+        block_clean = "\n".join(strip_comments(line) for line in block.splitlines())
+        is_tls = bool(re.search(r"\blisten\s+[^;]*(?:443|\bssl\b)[^;]*;|\bssl_certificate\s+", block_clean, re.I))
+        has_hsts = bool(re.search(r"\badd_header\s+Strict-Transport-Security\b", block_clean, re.I))
+        if is_tls and not has_hsts:
+            directive = '\n        # NGINX Scope: HSTS только для HTTPS.\n        add_header Strict-Transport-Security "max-age=31536000" always;\n'
+            fixed = fixed[:opening + 1] + directive + fixed[opening + 1:]
+            applied.append('add_header Strict-Transport-Security "max-age=31536000" always;')
+
+    clean = "\n".join(strip_comments(line) for line in fixed.splitlines())
+    http_ranges = _named_block_ranges(fixed, "http")
+    if http_ranges and not re.search(r"\blisten\s+[^;]*\bdefault_server\b", clean):
+        _, _, http_end = http_ranges[0]
+        catch_all = "\n    # NGINX Scope: неизвестные имена хостов не попадают в рабочие vhost.\n    server {\n        listen 80 default_server;\n        listen [::]:80 default_server;\n        server_name _;\n        return 444;\n    }\n"
+        fixed = fixed[:http_end - 1] + catch_all + fixed[http_end - 1:]
+        applied.append("HTTP default_server с return 444")
+
+    return fixed, applied, manual
 
 
 def nginx_config(args):
