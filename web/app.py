@@ -13,7 +13,11 @@ from audit import (
     SEVERITY_ORDER,
     aggregate_data,
     analyze_nginx_text,
+    build_publication_baseline,
     build_corrected_nginx_config,
+    compare_publication_baseline,
+    correlate_publications,
+    extract_publications,
     now_utc,
     validate_inventory,
 )
@@ -21,7 +25,7 @@ from audit import (
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
@@ -30,7 +34,7 @@ ALLOWED_JSON_SUFFIXES = {".json"}
 app = FastAPI(
     title="NGINX Scope",
     description="Аудит конфигураций Nginx и областей сетевой видимости",
-    version="1.1.0",
+    version="1.2.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -115,7 +119,8 @@ def score_for(findings):
 
 
 def build_report(config_findings, inventory=None, sensors=None, corrected_config=None,
-                 applied_fixes=None, manual_actions=None):
+                 applied_fixes=None, manual_actions=None, publications=None,
+                 baseline=None, comparison=None):
     sensors = sensors or []
     resources = []
     findings = list(config_findings)
@@ -142,6 +147,16 @@ def build_report(config_findings, inventory=None, sensors=None, corrected_config
         "corrected_config": corrected_config,
         "applied_fixes": applied_fixes or [],
         "manual_actions": manual_actions or [],
+        "publications": publications or [],
+        "baseline": baseline,
+        "comparison": comparison or {"status": "not_compared", "added": [], "removed": [], "modified": [], "unchanged": 0},
+        "methodology": [
+            "ФСТЭК России 12.04.2026: КК, ЗВТ.2-ЗВТ.4, ЗОО.5, ЗКС.1",
+            "CIS NGINX Benchmark 3.0.0",
+            "NIST SP 800-128",
+            "OWASP Web Security Testing Guide",
+            "официальная документация Nginx и TLSRef",
+        ],
         "privacy": "Исходный и исправленный конфиги возвращаются только в текущий ответ и не сохраняются на сервере",
     }
 
@@ -167,15 +182,20 @@ async def analyze(
     inventory: Optional[UploadFile] = File(None),
     external_sensor: Optional[UploadFile] = File(None),
     internal_sensor: Optional[UploadFile] = File(None),
+    baseline: Optional[UploadFile] = File(None),
 ):
     config_text = await read_upload(nginx_config)
     inventory_text = await read_upload(inventory, ALLOWED_JSON_SUFFIXES, required=False)
     external_text = await read_upload(external_sensor, ALLOWED_JSON_SUFFIXES, required=False)
     internal_text = await read_upload(internal_sensor, ALLOWED_JSON_SUFFIXES, required=False)
+    baseline_text = await read_upload(baseline, ALLOWED_JSON_SUFFIXES, required=False)
     source_name = Path(nginx_config.filename or "uploaded.conf").name[:160]
     config_findings = analyze_nginx_text(config_text, source_name)
+    publications = extract_publications(config_text, source_name)
+    config_findings.extend(item for publication in publications for item in publication["findings"])
     corrected_config, applied_fixes, manual_actions = build_corrected_nginx_config(config_text)
     inventory_data = parse_json_payload(inventory_text, "inventory")
+    baseline_data = parse_json_payload(baseline_text, "эталоне")
     sensors = []
     for text, expected_zone in ((external_text, "external"), (internal_text, "internal")):
         sensor = parse_json_payload(text, f"датчике {expected_zone}")
@@ -186,5 +206,15 @@ async def analyze(
         sensors.append(sensor)
     if sensors and inventory_data is None:
         raise HTTPException(status_code=422, detail="Для отчёта о видимости требуется inventory.json")
-    return JSONResponse(build_report(config_findings, inventory_data, sensors, corrected_config,
-                                     applied_fixes, manual_actions))
+    report = build_report(config_findings, inventory_data, sensors, corrected_config,
+                          applied_fixes, manual_actions)
+    publications = correlate_publications(publications, inventory_data, report["resources"])
+    try:
+        comparison = compare_publication_baseline(publications, baseline_data)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="Ошибка эталона: " + str(exc)) from exc
+    current_baseline = build_publication_baseline(publications, source_name)
+    report["publications"] = publications
+    report["baseline"] = current_baseline
+    report["comparison"] = comparison
+    return JSONResponse(report)
