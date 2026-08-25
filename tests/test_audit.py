@@ -53,6 +53,16 @@ class AuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             audit.validate_inventory(value)
 
+    def test_corrected_config_applies_safe_hardening(self):
+        config = "events {} http { server { listen 443 ssl; ssl_protocols TLSv1 TLSv1.2; autoindex on; } }"
+        fixed, applied, manual = audit.build_corrected_nginx_config(config)
+        self.assertIn("ssl_protocols TLSv1.2 TLSv1.3;", fixed)
+        self.assertIn("autoindex off;", fixed)
+        self.assertIn("Strict-Transport-Security", fixed)
+        self.assertIn("listen 80 default_server;", fixed)
+        self.assertTrue(applied)
+        self.assertTrue(any("Content-Security-Policy" in item for item in manual))
+
     def test_testssl_findings_are_normalized(self):
         sensor = self.sensor("internal", True, "10.1.2.3")
         sensor["targets"][0]["probes"][0]["url"] = "https://admin.example.invalid/"
