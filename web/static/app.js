@@ -151,7 +151,11 @@ document.querySelector('#export-pdf').addEventListener('click', async event => {
   try {
     const {corrected_config, ...pdfReport} = currentReport;
     const response = await fetch('/api/export/pdf', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(pdfReport)});
-    if (!response.ok) throw new Error(`Не удалось сформировать PDF (HTTP ${response.status})`);
+    if (!response.ok) {
+      let detail = '';
+      try { detail = (await response.json()).detail || ''; } catch (_) { /* Ответ прокси может быть не JSON. */ }
+      throw new Error(detail || `Не удалось сформировать PDF (HTTP ${response.status})`);
+    }
     const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a');
     link.href = url; link.download = 'nginx-scope-report.pdf'; link.hidden = true;
     document.body.appendChild(link); link.click(); link.remove();
