@@ -13,8 +13,8 @@ def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.5.1"
-    assert response.headers["x-nginx-scope-version"] == "1.5.1"
+    assert response.json()["version"] == "1.5.2"
+    assert response.headers["x-nginx-scope-version"] == "1.5.2"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -63,6 +63,16 @@ def test_full_pdf_export():
     assert len(response.content) > 5000
 
 
+def test_pdf_export_splits_oversized_location_and_server_excerpts():
+    directives = "\n".join(f"add_header X-Test-{index} value always;" for index in range(300))
+    config = f"events {{}} http {{ server {{ listen 80; server_name huge.example; location / {{ {directives} }} }} }}".encode()
+    report = client.post("/api/analyze", files={"nginx_config": ("huge.conf", config, "text/plain")}).json()
+    report.pop("corrected_config", None)
+    response = client.post("/api/export/pdf", json=report)
+    assert response.status_code == 200
+    assert response.content.startswith(b"%PDF-")
+
+
 def test_sarif_export_for_ci_cd():
     config = b"events {} http { server { listen 80; server_name app.example; location / { proxy_pass http://$arg_target; } } }"
     report = client.post("/api/analyze", files={"nginx_config": ("nginx.conf", config, "text/plain")}).json()
@@ -72,7 +82,7 @@ def test_sarif_export_for_ci_cd():
     assert response.headers["content-type"].startswith("application/sarif+json")
     payload = response.json()
     assert payload["version"] == "2.1.0"
-    assert payload["runs"][0]["tool"]["driver"]["version"] == "1.5.1"
+    assert payload["runs"][0]["tool"]["driver"]["version"] == "1.5.2"
     result = next(item for item in payload["runs"][0]["results"] if item["ruleId"] == "publication-dynamic-upstream-ssrf")
     assert result["level"] == "error"
     assert result["locations"][0]["physicalLocation"]["region"]["startLine"] > 0
