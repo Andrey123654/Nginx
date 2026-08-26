@@ -386,6 +386,25 @@ def strip_comments(line):
     return "".join(result)
 
 
+def has_alias_path_mismatch(content):
+    """Detect the classic prefix-location/alias trailing-slash mismatch linearly."""
+    for start, opening, end in _named_block_ranges(content, "location"):
+        header = content[start:opening]
+        match = re.search(r"\blocation\s+(.+)$", header, re.I)
+        if not match:
+            continue
+        path = " ".join(match.group(1).split())
+        if path.startswith(("~ ", "~* ", "@")):
+            continue
+        raw_path = re.sub(r"^(?:=|\^~)\s+", "", path)
+        block_clean = "\n".join(strip_comments(line) for line in content[opening:end].splitlines())
+        if raw_path and not raw_path.endswith("/") and any(
+            value.rstrip().endswith("/") for value in _directive_values_clean(block_clean, "alias")
+        ):
+            return True
+    return False
+
+
 def analyze_nginx_text(content, source="uploaded-nginx-config"):
     """Analyze Nginx text without retaining or returning the raw configuration."""
     clean = "\n".join(strip_comments(line) for line in content.splitlines())
@@ -414,7 +433,7 @@ def analyze_nginx_text(content, source="uploaded-nginx-config"):
             continue
         if re.search(r"\badd_header\s+" + re.escape(header) + r"\b", clean, re.I) is None:
             add(severity, "nginx-header-" + header, "Не найден add_header " + header)
-    if re.search(r"location\s+[^\{]*\.\.?.*\{[^}]*\balias\s+", clean, re.S):
+    if has_alias_path_mismatch(clean):
         add("high", "nginx-alias-traversal", "Проверьте сочетание location и alias на path traversal")
     if not re.search(r"\blisten\s+[^;]*\bdefault_server\b", clean):
         add("low", "nginx-no-default-server", "Не найден явный default_server/catch-all")
@@ -471,6 +490,19 @@ def _header_names(values):
     return {value.split()[0].lower() for value in values if value.split()}
 
 
+def _apply_insertions(content, insertions):
+    """Apply many offset-based insertions in one linear pass."""
+    if not insertions:
+        return content
+    parts = []
+    previous = 0
+    for position, value in sorted(insertions, key=lambda item: item[0]):
+        parts.extend((content[previous:position], value))
+        previous = position
+    parts.append(content[previous:])
+    return "".join(parts)
+
+
 def build_corrected_nginx_config(content):
     """Apply conservative hardening and return config plus changes requiring an owner."""
     fixed = content.replace("\r\n", "\n").replace("\r", "\n")
@@ -507,12 +539,13 @@ def build_corrected_nginx_config(content):
     clean = "\n".join(strip_comments(line) for line in fixed.splitlines())
     if re.search(r"\bstub_status\s*;", clean) and not re.search(r"\ballow\s+(?:127\.0\.0\.1|::1|unix:)", clean):
         manual.append("Укажите доверенный CIDR мониторинга для stub_status и завершите allowlist директивой deny all;.")
-    if re.search(r"location\s+[^\{]*\.\.?[^\{]*\{[^}]*\balias\s+", clean, re.S):
+    if has_alias_path_mismatch(clean):
         manual.append("Проверьте найденную пару location/alias вручную: автоматическая смена путей может нарушить маршрутизацию.")
     if not re.search(r"\badd_header\s+Content-Security-Policy\b", clean, re.I):
         manual.append("Настройте Content-Security-Policy по реальным источникам приложения, сначала в режиме Report-Only.")
 
-    for _, opening, end in reversed(_named_block_ranges(fixed, "server")):
+    server_insertions = []
+    for _, opening, end in _named_block_ranges(fixed, "server"):
         block = fixed[opening:end]
         block_clean = "\n".join(strip_comments(line) for line in block.splitlines())
         is_tls = bool(re.search(r"\blisten\s+[^;]*(?:443|\bssl\b)[^;]*;|\bssl_certificate\s+", block_clean, re.I))
@@ -533,19 +566,27 @@ def build_corrected_nginx_config(content):
                     additions.append(f"        add_header {header} {value} always;")
         if additions:
             directive = "\n        # NGINX Scope: явный набор заголовков для корректного наследования.\n" + "\n".join(additions) + "\n"
-            fixed = fixed[:opening + 1] + directive + fixed[opening + 1:]
+            server_insertions.append((opening + 1, directive))
+    fixed = _apply_insertions(fixed, server_insertions)
 
     # A location-level add_header normally replaces inherited add_header values.
     # Repeat only the conservative security baseline so the corrected config does
     # not lose headers after it is uploaded for a second audit.
     server_ranges = _named_block_ranges(fixed, "server")
-    for _, opening, end in reversed(_named_block_ranges(fixed, "location")):
+    server_index = 0
+    location_insertions = []
+    for _, opening, end in _named_block_ranges(fixed, "location"):
         location_block = fixed[opening:end]
         location_clean = "\n".join(strip_comments(line) for line in location_block.splitlines())
         if not re.search(r"\badd_header\s+", location_clean, re.I):
             continue
-        parent = next((fixed[s_start:s_end] for s_start, _, s_end in server_ranges
-                       if s_start <= opening and end <= s_end), "")
+        while server_index + 1 < len(server_ranges) and server_ranges[server_index + 1][0] <= opening:
+            server_index += 1
+        parent = ""
+        if server_ranges:
+            server_start, _, server_end = server_ranges[server_index]
+            if server_start <= opening and end <= server_end:
+                parent = fixed[server_start:server_end]
         parent_clean = "\n".join(strip_comments(line) for line in parent.splitlines())
         is_tls = bool(re.search(r"\blisten\s+[^;]*(?:443|\bssl\b)[^;]*;|\bssl_certificate\s+", parent_clean, re.I))
         additions = []
@@ -561,8 +602,9 @@ def build_corrected_nginx_config(content):
                 additions.append(f"            add_header {header} {value} always;")
         if additions:
             directive = "\n            # NGINX Scope: location не теряет защитные заголовки родителя.\n" + "\n".join(additions) + "\n"
-            fixed = fixed[:opening + 1] + directive + fixed[opening + 1:]
+            location_insertions.append((opening + 1, directive))
             applied.extend(directive.strip() for directive in additions)
+    fixed = _apply_insertions(fixed, location_insertions)
 
     clean = "\n".join(strip_comments(line) for line in fixed.splitlines())
     http_ranges = _named_block_ranges(fixed, "http")
@@ -577,8 +619,12 @@ def build_corrected_nginx_config(content):
 
 def _directive_values(content, name):
     clean = "\n".join(strip_comments(line) for line in content.splitlines())
+    return _directive_values_clean(clean, name)
+
+
+def _directive_values_clean(clean, name):
     return [" ".join(match.group(1).split()) for match in re.finditer(
-        r"(?:^|(?<=[;{}]))\s*" + re.escape(name) + r"\s+([^;]+);", clean, re.I | re.M
+        r"(?:^[ \t]*|(?<=[;{}])[ \t]*)" + re.escape(name) + r"\s+([^;{}]+);", clean, re.I | re.M
     )]
 
 
@@ -667,9 +713,10 @@ def explain_location(path, excerpt):
         "autoindex": ("Листинг каталога", "Значение on показывает список файлов при отсутствии index и может раскрыть содержимое."),
     }
     directives = []
+    clean_excerpt = "\n".join(strip_comments(line) for line in excerpt.splitlines())
     for name, (title, impact) in directive_help.items():
-        values = _directive_values(excerpt, name)
-        if name in {"internal", "stub_status"} and re.search(r"\b" + name + r"\s*;", excerpt, re.I):
+        values = _directive_values_clean(clean_excerpt, name)
+        if name in {"internal", "stub_status"} and re.search(r"\b" + name + r"\s*;", clean_excerpt, re.I):
             values = ["on"]
         for value in values:
             directives.append({"name": name, "value": value, "title": title, "impact": impact})
@@ -803,16 +850,24 @@ def extract_publications(content, source="uploaded-nginx-config"):
     if http_ranges:
         http_start, _, http_end = http_ranges[0]
         http_scope = _mask_named_blocks(content[http_start:http_end], "server")
-        http_parent_headers = _header_names(_directive_values(http_scope, "add_header"))
-        http_inherit_merge = bool(re.search(r"\badd_header_inherit\s+merge\s*;", http_scope, re.I))
+        http_scope_clean = "\n".join(strip_comments(line) for line in http_scope.splitlines())
+        http_parent_headers = _header_names(_directive_values_clean(http_scope_clean, "add_header"))
+        http_inherit_merge = bool(re.search(r"\badd_header_inherit\s+merge\s*;", http_scope_clean, re.I))
+    line_cursor = 0
+    current_line = 1
     for number, (start, opening, end) in enumerate(_named_block_ranges(content, "server"), 1):
+        current_line += content.count("\n", line_cursor, start)
+        line_cursor = start
+        line_start = current_line
         block = content[start:end].strip()
-        listens = _directive_values(block, "listen") or ["80 (implicit)"]
+        clean = "\n".join(strip_comments(line) for line in block.splitlines())
+        listens = _directive_values_clean(clean, "listen") or ["80 (implicit)"]
         names = []
-        for value in _directive_values(block, "server_name"):
+        for value in _directive_values_clean(clean, "server_name"):
             names.extend(value.split())
         names = names or ["(не задан)"]
-        upstreams = _directive_values(block, "proxy_pass") + _directive_values(block, "fastcgi_pass") + _directive_values(block, "uwsgi_pass")
+        upstreams = (_directive_values_clean(clean, "proxy_pass") + _directive_values_clean(clean, "fastcgi_pass")
+                     + _directive_values_clean(clean, "uwsgi_pass"))
         locations = _location_blocks(block)
         declared_zones, visibility_basis = _listen_visibility([x for x in listens if not x.endswith("(implicit)")])
         if listens == ["80 (implicit)"]:
@@ -820,7 +875,6 @@ def extract_publications(content, source="uploaded-nginx-config"):
             visibility_basis = ["Неявный listen *:80: все интерфейсы"]
         identity_seed = "|".join(sorted(names)) + f"|position:{number}"
         publication_id = "pub-" + hashlib.sha256(identity_seed.encode("utf-8")).hexdigest()[:12]
-        clean = "\n".join(strip_comments(line) for line in block.splitlines())
         tls = bool(re.search(r"\blisten\s+[^;]*(?:443|\bssl\b)[^;]*;|\bssl_certificate\s+", clean, re.I))
         external_possible = "external" in declared_zones
         reject_only = bool(
@@ -832,7 +886,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
 
         # Gixy-derived data-flow checks. They intentionally target only
         # request-controlled variables in security-sensitive positions.
-        for value in _directive_values(block, "proxy_pass"):
+        for value in _directive_values_clean(clean, "proxy_pass"):
             match = re.match(r"https?://([^/]+)", value, re.I)
             authority = match.group(1) if match else ""
             if authority and REQUEST_CONTROLLED_VARIABLE.search(authority):
@@ -841,7 +895,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
                     "Не подставляйте $host, $http_* или $arg_* в адрес proxy_pass. Выбирайте статический upstream через map с закрытым default и allowlist допустимых значений.",
                     "SSRF / КК", value))
 
-        for value in _directive_values(block, "proxy_set_header"):
+        for value in _directive_values_clean(clean, "proxy_set_header"):
             if re.match(r"Host\s+\$http_host(?:\s|$)", value, re.I):
                 findings.append(_publication_finding("high", "publication-host-header-spoofing", publication_id,
                     "В upstream передаётся непроверенный заголовок Host клиента",
@@ -850,7 +904,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
 
         splitting_evidence = []
         for directive in ("add_header", "return", "rewrite"):
-            for value in _directive_values(block, directive):
+            for value in _directive_values_clean(clean, directive):
                 sensitive_sink = (
                     directive == "add_header"
                     or (directive == "return" and re.match(r"30[1278]\s+", value))
@@ -865,8 +919,9 @@ def extract_publications(content, source="uploaded-nginx-config"):
                 "HTTP splitting / КК", "; ".join(splitting_evidence[:3])))
 
         server_scope = _mask_named_blocks(block, "location")
-        server_headers = _header_names(_directive_values(server_scope, "add_header"))
-        server_inherit_merge = http_inherit_merge or bool(re.search(r"\badd_header_inherit\s+merge\s*;", server_scope, re.I))
+        server_scope_clean = "\n".join(strip_comments(line) for line in server_scope.splitlines())
+        server_headers = _header_names(_directive_values_clean(server_scope_clean, "add_header"))
+        server_inherit_merge = http_inherit_merge or bool(re.search(r"\badd_header_inherit\s+merge\s*;", server_scope_clean, re.I))
         parent_headers = (http_parent_headers | server_headers) if server_inherit_merge or not server_headers else server_headers
         parent_security_headers = parent_headers & SECURITY_HEADER_NAMES
         hidden_at_server = sorted((http_parent_headers & SECURITY_HEADER_NAMES) - server_headers)
@@ -876,8 +931,8 @@ def extract_publications(content, source="uploaded-nginx-config"):
                 "Повторите в server весь требуемый набор add_header с always. add_header_inherit merge допустим только после подтверждения Nginx 1.29.3+.",
                 "ЗВТ.3 / headers", ", ".join(hidden_at_server)))
 
-        server_allows = _directive_values(server_scope, "allow")
-        server_denies = [value.lower() for value in _directive_values(server_scope, "deny")]
+        server_allows = _directive_values_clean(server_scope_clean, "allow")
+        server_denies = [value.lower() for value in _directive_values_clean(server_scope_clean, "deny")]
         if server_allows and "all" not in server_denies:
             findings.append(_publication_finding("medium", "publication-incomplete-acl", publication_id,
                 "В блоке server есть allow без завершающего deny all",
@@ -885,7 +940,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
                 "УПД / ACL", ", ".join(server_allows)))
         for location in locations:
             location_clean = "\n".join(strip_comments(line) for line in location["config_excerpt"].splitlines())
-            location_headers = _header_names(_directive_values(location_clean, "add_header"))
+            location_headers = _header_names(_directive_values_clean(location_clean, "add_header"))
             inherit_merge = server_inherit_merge or bool(re.search(r"\badd_header_inherit\s+merge\s*;", location_clean, re.I))
             hidden_headers = sorted(parent_security_headers - location_headers)
             if location_headers and hidden_headers and not inherit_merge:
@@ -894,7 +949,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
                     "Повторите в location весь требуемый набор add_header с always. add_header_inherit merge допустим только после подтверждения Nginx 1.29.3+.",
                     "ЗВТ.3 / headers", ", ".join(hidden_headers)))
 
-            aliases = _directive_values(location_clean, "alias")
+            aliases = _directive_values_clean(location_clean, "alias")
             match_type = location.get("explanation", {}).get("match_type")
             raw_path = re.sub(r"^(?:=|\^~)\s+", "", location["path"].strip())
             if match_type in {"Префиксный маршрут", "Точное совпадение", "Приоритетный префикс"}:
@@ -905,15 +960,15 @@ def extract_publications(content, source="uploaded-nginx-config"):
                             "Согласуйте завершающий / у префикса location и каталога alias либо используйте root; затем проверьте граничные URI и nginx -t.",
                             "Path traversal / КК", f"location {location['path']}; alias {alias}"))
 
-            allows = _directive_values(location_clean, "allow")
-            denies = [value.lower() for value in _directive_values(location_clean, "deny")]
+            allows = _directive_values_clean(location_clean, "allow")
+            denies = [value.lower() for value in _directive_values_clean(location_clean, "deny")]
             if allows and "all" not in denies:
                 findings.append(_publication_finding("medium", "publication-incomplete-acl", publication_id,
                     f"В location {location['path']} есть allow без завершающего deny all",
                     "Завершите IP-allowlist директивой deny all и проверьте порядок правил. Если доступ должен быть открытым, удалите вводящий в заблуждение allow.",
                     "УПД / ACL", ", ".join(allows)))
 
-        for value in _directive_values(block, "valid_referers"):
+        for value in _directive_values_clean(clean, "valid_referers"):
             tokens = {token.lower() for token in value.split()}
             unsafe = sorted(tokens & {"none", "blocked"})
             if unsafe:
@@ -968,7 +1023,6 @@ def extract_publications(content, source="uploaded-nginx-config"):
                 "Не найдены явные timeout для reverse proxy",
                 "Задайте минимально достаточные proxy_connect_timeout, proxy_read_timeout и proxy_send_timeout по SLA.", "ЗОО.5"))
 
-        line_start = content.count("\n", 0, start) + 1
         for item in findings:
             item.setdefault("source", source)
             item.setdefault("line", line_start)
@@ -979,7 +1033,11 @@ def extract_publications(content, source="uploaded-nginx-config"):
             "proxy_ssl_verify", "proxy_connect_timeout", "proxy_read_timeout", "proxy_send_timeout",
             "root", "alias", "return",
         )
-        tracked_settings = {name: _directive_values(block, name) for name in tracked_names if _directive_values(block, name)}
+        tracked_settings = {}
+        for name in tracked_names:
+            values = _directive_values_clean(clean, name)
+            if values:
+                tracked_settings[name] = values
         normalized_block = " ".join(clean.split())
         finding_counts = {severity: sum(1 for item in findings if item["severity"] == severity)
                           for severity in ("critical", "high", "medium", "low")}
