@@ -56,7 +56,7 @@ def generate_sarif_report(report):
             "tool": {"driver": {
                 "name": "NGINX Scope",
                 "informationUri": "https://github.com/Andrey123654/Nginx",
-                "version": "1.5.1",
+                "version": "1.5.2",
                 "rules": list(rules.values()),
             }},
             "results": results,
