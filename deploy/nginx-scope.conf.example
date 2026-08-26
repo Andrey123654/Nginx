@@ -37,7 +37,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_connect_timeout 5s;
-        proxy_read_timeout 30s;
+        # Большой nginx -T с тысячами server/location требует больше времени на статический анализ.
+        client_body_timeout 120s;
+        proxy_send_timeout 180s;
+        proxy_read_timeout 180s;
+        send_timeout 180s;
         proxy_request_buffering on;
     }
 
