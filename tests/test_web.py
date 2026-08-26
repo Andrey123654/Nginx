@@ -13,8 +13,8 @@ def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.5.0"
-    assert response.headers["x-nginx-scope-version"] == "1.5.0"
+    assert response.json()["version"] == "1.5.1"
+    assert response.headers["x-nginx-scope-version"] == "1.5.1"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -72,7 +72,7 @@ def test_sarif_export_for_ci_cd():
     assert response.headers["content-type"].startswith("application/sarif+json")
     payload = response.json()
     assert payload["version"] == "2.1.0"
-    assert payload["runs"][0]["tool"]["driver"]["version"] == "1.5.0"
+    assert payload["runs"][0]["tool"]["driver"]["version"] == "1.5.1"
     result = next(item for item in payload["runs"][0]["results"] if item["ruleId"] == "publication-dynamic-upstream-ssrf")
     assert result["level"] == "error"
     assert result["locations"][0]["physicalLocation"]["region"]["startLine"] > 0
@@ -99,6 +99,23 @@ def test_arbitrary_extension_is_accepted_for_text_config():
         "nginx_config": ("nginx.yaml", b"events {}", "text/plain")
     })
     assert response.status_code == 200
+
+
+def test_734_kib_combined_nginx_dump_is_accepted():
+    servers = "".join(
+        f"server {{ listen 80; server_name app{index}.example; location / {{ proxy_pass http://backend; }} }}\n"
+        for index in range(250)
+    )
+    wrapper = "events {}\nhttp {\n" + servers
+    target_size = 734 * 1024
+    padding_lines = max(0, (target_size - len(wrapper.encode()) - 3) // 4)
+    config = (wrapper + "# x\n" * padding_lines + "}\n").encode()
+    response = client.post("/api/analyze", files={
+        "nginx_config": ("nginx-full.conf", config, "text/plain")
+    })
+    assert 730 * 1024 <= len(config) <= 734 * 1024
+    assert response.status_code == 200
+    assert len(response.json()["publications"]) == 250
 
 
 def test_config_only_with_empty_optional_uploads_is_accepted():
