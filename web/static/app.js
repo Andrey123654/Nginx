@@ -87,10 +87,10 @@ function render(report) {
 form.addEventListener('submit', async event => {
   event.preventDefault(); errorBox.hidden = true;
   const button = form.querySelector('.run'); const label = document.querySelector('#run-label');
+  const configFile = configInput.files[0];
   button.disabled = true; label.textContent = 'Анализируем…';
   try {
     const payload = new FormData();
-    const configFile = configInput.files[0];
     if (configFile) payload.append('nginx_config', configFile);
     for (const field of ['inventory', 'external_sensor', 'internal_sensor', 'baseline']) {
       const optionalFile = form.elements[field].files[0];
@@ -112,7 +112,13 @@ form.addEventListener('submit', async event => {
     }
     render(data);
   } catch (error) {
-    const reason = error.reason || {message: error.message};
+    const networkFailure = !error.reason && (error instanceof TypeError || /NetworkError|fetch|network/i.test(error.message || ''));
+    const reason = error.reason || (networkFailure ? {
+      code: 'network_failure',
+      message: 'Соединение с сервисом прервано до получения отчёта',
+      filename: configFile?.name,
+      hint: `Файл ${(configFile?.size / 1024 || 0).toFixed(1)} КБ мог превысить тайм-аут reverse proxy. Установите proxy_read_timeout и proxy_send_timeout не менее 180s, затем повторите анализ.`,
+    } : {message: error.message});
     errorBox.replaceChildren();
     const title = document.createElement('b'); title.textContent = reason.message || 'Файл отклонён';
     errorBox.appendChild(title);
