@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from audit import (
     SCHEMA_VERSION,
@@ -27,7 +28,7 @@ from web.sarif_report import generate_sarif_report
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
@@ -36,7 +37,7 @@ ALLOWED_JSON_SUFFIXES = {".json"}
 app = FastAPI(
     title="NGINX Scope",
     description="Аудит конфигураций Nginx и областей сетевой видимости",
-    version="1.5.0",
+    version="1.5.1",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -118,6 +119,15 @@ def parse_json_payload(text, label):
 def score_for(findings):
     penalties = {"critical": 24, "high": 14, "medium": 6, "low": 2, "info": 0}
     return max(0, 100 - sum(penalties.get(item.get("severity", "info"), 0) for item in findings))
+
+
+def analyze_config_bundle(config_text, source_name):
+    """Run CPU-heavy parsing outside the asynchronous request loop."""
+    config_findings = analyze_nginx_text(config_text, source_name)
+    publications = extract_publications(config_text, source_name)
+    config_findings.extend(item for publication in publications for item in publication["findings"])
+    corrected_config, applied_fixes, manual_actions = build_corrected_nginx_config(config_text)
+    return config_findings, publications, corrected_config, applied_fixes, manual_actions
 
 
 def build_report(config_findings, inventory=None, sensors=None, corrected_config=None,
@@ -222,10 +232,9 @@ async def analyze(
     internal_text = await read_upload(internal_sensor, ALLOWED_JSON_SUFFIXES, required=False)
     baseline_text = await read_upload(baseline, ALLOWED_JSON_SUFFIXES, required=False)
     source_name = Path(nginx_config.filename or "uploaded.conf").name[:160]
-    config_findings = analyze_nginx_text(config_text, source_name)
-    publications = extract_publications(config_text, source_name)
-    config_findings.extend(item for publication in publications for item in publication["findings"])
-    corrected_config, applied_fixes, manual_actions = build_corrected_nginx_config(config_text)
+    config_findings, publications, corrected_config, applied_fixes, manual_actions = await run_in_threadpool(
+        analyze_config_bundle, config_text, source_name
+    )
     inventory_data = parse_json_payload(inventory_text, "inventory")
     baseline_data = parse_json_payload(baseline_text, "эталоне")
     sensors = []
