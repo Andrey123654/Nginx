@@ -153,8 +153,8 @@ def _meta_table(rows, styles):
     return table
 
 
-def _code_block(content, styles):
-    pre = Preformatted(content or "", styles["code"], maxLineLength=105, splitChars=" /;")
+def _code_table(content, styles):
+    pre = Preformatted(content, styles["code"], maxLineLength=105, splitChars=" /;")
     table = Table([[pre]], colWidths=[172 * mm])
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), INK), ("BOX", (0, 0), (-1, -1), 0.5, INK),
@@ -162,6 +162,21 @@ def _code_block(content, styles):
         ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
     ]))
     return table
+
+
+def _code_blocks(content, styles, lines_per_block=55, line_width=105):
+    """Return page-sized code tables so a large server/location can split safely."""
+    visual_lines = []
+    for raw_line in (content or "").splitlines() or [""]:
+        # Preformatted wraps long physical lines too. Split them here as well so
+        # no single table row can grow beyond a PDF page.
+        if not raw_line:
+            visual_lines.append("")
+            continue
+        visual_lines.extend(raw_line[start:start + line_width]
+                            for start in range(0, len(raw_line), line_width))
+    return [_code_table("\n".join(visual_lines[start:start + lines_per_block]), styles)
+            for start in range(0, len(visual_lines), lines_per_block)]
 
 
 def generate_pdf_report(report):
@@ -230,10 +245,10 @@ def generate_pdf_report(report):
                 for directive in explanation.get("directives", []):
                     block.append(Paragraph(f"<b>{_text(directive.get('name'))} {_text(directive.get('value'))}</b>: {_text(directive.get('title'))}. {_text(directive.get('impact'))}", styles["small"]))
                 story.append(KeepTogether(block))
-                story.append(_code_block(location.get("config_excerpt", ""), styles))
+                story.extend(_code_blocks(location.get("config_excerpt", ""), styles))
                 story.append(Spacer(1, 2 * mm))
         story.append(Paragraph("Фрагмент server", styles["h3"]))
-        story.append(_code_block(publication.get("config_excerpt", ""), styles))
+        story.extend(_code_blocks(publication.get("config_excerpt", ""), styles))
         story.append(Spacer(1, 5 * mm))
 
     story.extend([PageBreak(), _section_banner("4. Области видимости", styles), Spacer(1, 3 * mm)])
