@@ -56,6 +56,8 @@ docker compose up -d
 
 Если объединённый `nginx -T` размером меньше 5 МБ завершается в браузере сообщением `NetworkError when attempting to fetch resource`, обновите reverse proxy по `deploy/nginx-scope.conf.example`. Для `/api/` необходимы `proxy_read_timeout 180s`, `proxy_send_timeout 180s` и `send_timeout 180s`; после изменения выполните `sudo nginx -t && sudo systemctl reload nginx`.
 
+Если экспорт PDF для большой публикации ранее завершался HTTP 500, обновите сервис до версии 1.5.2 или новее и перезапустите процесс. В этой версии длинные фрагменты `server` и `location` разбиваются на несколько PDF-страниц.
+
 Если код был обновлён вручную в `/opt/nginx-scope`, обязательно перезапустите процесс:
 
 ```bash
