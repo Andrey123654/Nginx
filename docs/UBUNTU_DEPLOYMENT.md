@@ -54,6 +54,8 @@ docker compose up -d
 
 Для systemd повторно запустите `sudo ./deploy/install-ubuntu.sh` после `git pull --ff-only`. Установщик копирует обновлённые файлы и принудительно перезапускает уже работающий `nginx-scope.service`.
 
+Если объединённый `nginx -T` размером меньше 5 МБ завершается в браузере сообщением `NetworkError when attempting to fetch resource`, обновите reverse proxy по `deploy/nginx-scope.conf.example`. Для `/api/` необходимы `proxy_read_timeout 180s`, `proxy_send_timeout 180s` и `send_timeout 180s`; после изменения выполните `sudo nginx -t && sudo systemctl reload nginx`.
+
 Если код был обновлён вручную в `/opt/nginx-scope`, обязательно перезапустите процесс:
 
 ```bash
