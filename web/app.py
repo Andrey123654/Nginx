@@ -28,7 +28,7 @@ from web.sarif_report import generate_sarif_report
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
@@ -37,7 +37,7 @@ ALLOWED_JSON_SUFFIXES = {".json"}
 app = FastAPI(
     title="NGINX Scope",
     description="Аудит конфигураций Nginx и областей сетевой видимости",
-    version="1.5.1",
+    version="1.5.2",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -196,9 +196,16 @@ async def export_pdf(report: dict = Body(...)):
     if len(json.dumps(report, ensure_ascii=False)) > 16 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Отчёт слишком большой для экспорта PDF")
     try:
-        content = generate_pdf_report(report)
-    except (RuntimeError, ValueError, TypeError, KeyError) as exc:
+        content = await run_in_threadpool(generate_pdf_report, report)
+    except RuntimeError as exc:
         raise HTTPException(status_code=422, detail="Не удалось сформировать PDF: " + str(exc)) from exc
+    except Exception as exc:
+        # Do not return ReportLab's flowable representation: it can contain
+        # fragments of the uploaded configuration.
+        raise HTTPException(
+            status_code=422,
+            detail=f"Не удалось сформировать PDF: ошибка генератора {type(exc).__name__}",
+        ) from exc
     return Response(content, media_type="application/pdf", headers={
         "Content-Disposition": 'attachment; filename="nginx-scope-report.pdf"',
         "Cache-Control": "no-store",
