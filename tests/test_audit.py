@@ -102,6 +102,25 @@ class AuditTests(unittest.TestCase):
         tls_block = next(item["config_excerpt"] for item in publications if item["tls"])
         self.assertIn("X-Content-Type-Options", tls_block)
 
+    def test_labeled_bundle_separates_stream_from_http_checks(self):
+        content = """==> /etc/nginx/stream.d/db.conf <==
+server { listen 5432; proxy_pass 10.0.0.20:5432; }
+==> /etc/nginx/conf.d/app.conf <==
+server { listen 80; server_name app.example; return 301 https://$server_name$request_uri; }
+"""
+        publications = audit.extract_publications(content, "bundle.conf")
+        self.assertEqual([item["publication_type"] for item in publications], ["stream", "application"])
+        self.assertEqual(publications[0]["findings"], [])
+        http_rules = {item["rule"] for item in publications[1]["findings"]}
+        self.assertNotIn("publication-http-splitting", http_rules)
+        self.assertNotIn("publication-cleartext", http_rules)
+        self.assertNotIn("publication-rate-limit-missing", http_rules)
+
+        corrected, _, manual = audit.build_corrected_nginx_config(content)
+        stream_section = corrected.split("# ==> /etc/nginx/conf.d/app.conf <==", 1)[0]
+        self.assertNotIn("add_header", stream_section)
+        self.assertTrue(any("разнести" in item for item in manual))
+
     def test_gixy_derived_rules_are_reported_per_publication(self):
         config = """events {} http {
           add_header X-Content-Type-Options nosniff always;
