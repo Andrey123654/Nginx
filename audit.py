@@ -33,6 +33,8 @@ REQUEST_CONTROLLED_VARIABLE = re.compile(
     r"\$(?:http_[A-Za-z0-9_]+|arg_[A-Za-z0-9_]+|cookie_[A-Za-z0-9_]+|request_uri|uri|host)",
     re.I,
 )
+SAFE_REDIRECT_VARIABLES = {"$host", "$http_host", "$request_uri", "$uri"}
+BUNDLE_SECTION_RE = re.compile(r"(?m)^\s*(?:#\s*)?==>\s+(.+?)\s+<==\s*$")
 
 RULE_REFERENCES = {
     "publication-dynamic-upstream-ssrf": [{"title": "Gixy: SSRF", "url": "https://github.com/yandex/gixy/blob/master/docs/en/plugins/ssrf.md"}],
@@ -42,10 +44,13 @@ RULE_REFERENCES = {
     "publication-alias-traversal": [{"title": "Gixy: alias traversal", "url": "https://github.com/yandex/gixy/blob/master/docs/en/plugins/aliastraversal.md"}],
     "publication-incomplete-acl": [{"title": "NGINX: access module", "url": "https://nginx.org/en/docs/http/ngx_http_access_module.html"}],
     "publication-unsafe-valid-referers": [{"title": "Gixy: valid_referers", "url": "https://github.com/yandex/gixy/blob/master/docs/en/plugins/validreferers.md"}],
+    "publication-untrusted-redirect-host": [{"title": "NGINX: return", "url": "https://nginx.org/en/docs/http/ngx_http_rewrite_module.html#return"}],
 }
 
 REMEDIATIONS = {
     "nginx-version-disclosure": "Добавьте server_tokens off; в контекст http и проверьте, что upstream не раскрывает свою версию.",
+    "external-registry-unmatched": "Уточните, на каком узле завершается DNAT, приложите конфигурацию этого узла либо удалите неиспользуемое правило межсетевого экрана.",
+    "external-registry-ambiguous": "Укажите IP интерфейса в listen или загрузите конфигурации по узлам отдельно, чтобы правило DNAT сопоставлялось однозначно.",
     "nginx-server-tokens": "Добавьте server_tokens off; в контекст http.",
     "nginx-old-tls": "Оставьте только ssl_protocols TLSv1.2 TLSv1.3; и проверьте совместимость клиентов.",
     "nginx-tls-policy-missing": "Явно задайте ssl_protocols TLSv1.2 TLSv1.3; в контексте http.",
@@ -386,6 +391,50 @@ def strip_comments(line):
     return "".join(result)
 
 
+def split_config_bundle(content):
+    """Split `cat/head`-style multi-file exports and classify HTTP vs stream fragments."""
+    matches = list(BUNDLE_SECTION_RE.finditer(content))
+    if not matches:
+        return []
+    sections = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        if start < len(content) and content[start] == "\n":
+            start += 1
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        path = match.group(1).strip()
+        body = content[start:end]
+        lowered_path = path.replace("\\", "/").lower()
+        clean = "\n".join(strip_comments(line) for line in body.splitlines())
+        if re.search(r"(?:^|/)stream(?:\.d)?/", lowered_path):
+            context = "stream"
+        elif re.search(r"\b(?:location|server_name|fastcgi_pass|uwsgi_pass)\b", clean, re.I):
+            context = "http"
+        elif re.search(r"\b(?:proxy_responses|proxy_upload_rate|proxy_download_rate|preread_buffer_size)\b", clean, re.I):
+            context = "stream"
+        else:
+            context = "http"
+        sections.append({
+            "path": path,
+            "content": body,
+            "context": context,
+            "line_offset": content.count("\n", 0, start),
+        })
+    return sections
+
+
+def _http_audit_content(content):
+    sections = split_config_bundle(content)
+    if not sections:
+        return content
+    return "\n".join(section["content"] for section in sections if section["context"] == "http")
+
+
+def _has_unsafe_response_variable(value):
+    return any(match.group(0).lower() not in SAFE_REDIRECT_VARIABLES
+               for match in REQUEST_CONTROLLED_VARIABLE.finditer(value))
+
+
 def has_alias_path_mismatch(content):
     """Detect the classic prefix-location/alias trailing-slash mismatch linearly."""
     for start, opening, end in _named_block_ranges(content, "location"):
@@ -407,6 +456,7 @@ def has_alias_path_mismatch(content):
 
 def analyze_nginx_text(content, source="uploaded-nginx-config"):
     """Analyze Nginx text without retaining or returning the raw configuration."""
+    content = _http_audit_content(content)
     clean = "\n".join(strip_comments(line) for line in content.splitlines())
     findings = []
 
@@ -505,6 +555,24 @@ def _apply_insertions(content, insertions):
 
 def build_corrected_nginx_config(content):
     """Apply conservative hardening and return config plus changes requiring an owner."""
+    sections = split_config_bundle(content)
+    if sections:
+        rendered = [
+            "# NGINX Scope: исправленный многофайловый набор. Разделите секции по указанным путям\n",
+            "# и обязательно выполните nginx -t перед применением. Stream-секции не изменялись.\n",
+        ]
+        applied = []
+        manual = []
+        for section in sections:
+            body = section["content"]
+            if section["context"] == "http":
+                body, section_applied, section_manual = build_corrected_nginx_config(body)
+                applied.extend(section_applied)
+                manual.extend(section_manual)
+            rendered.extend((f"# ==> {section['path']} <==\n", body.rstrip(), "\n\n"))
+        manual.append("Исправленный многофайловый набор необходимо разнести обратно по исходным путям; единым nginx.conf он не является.")
+        return "".join(rendered), list(dict.fromkeys(applied)), list(dict.fromkeys(manual))
+
     fixed = content.replace("\r\n", "\n").replace("\r", "\n")
     fixed = re.sub(r"\bserver_tokens\s+[^;]+;", "server_tokens off;", fixed, flags=re.I)
     fixed = re.sub(r"\bssl_protocols\s+[^;]+;", "ssl_protocols TLSv1.2 TLSv1.3;", fixed, flags=re.I)
@@ -729,6 +797,21 @@ def explain_location(path, excerpt):
 
 
 def build_publication_setting_explanations(publication):
+    if publication.get("publication_type") == "stream":
+        return [
+            {"setting": "listen", "value": ", ".join(publication.get("listen", [])),
+             "meaning": "Сетевой адрес, порт и транспорт TCP/UDP, принимаемые модулем stream.",
+             "impact": "Определяет поверхность L4-публикации; HTTP-заголовки и location здесь неприменимы."},
+            {"setting": "протокол", "value": ", ".join(publication.get("transport_protocols", [])),
+             "meaning": "Транспортный протокол публикации.",
+             "impact": "Должен совпадать с правилом DNAT и ожидаемым протоколом сервиса."},
+            {"setting": "upstream", "value": ", ".join(publication.get("upstreams", [])) or "не найден",
+             "meaning": "Внутренний L4-сервис, которому передаётся соединение.",
+             "impact": "Адрес и порт используются для сверки с реестром внешних публикаций."},
+            {"setting": "TLS stream", "value": "терминация включена" if publication.get("tls") else "не обнаружена",
+             "meaning": "TLS может завершаться на Nginx, передаваться сквозным потоком либо отсутствовать.",
+             "impact": "Отсутствие ssl в stream само по себе не считается уязвимостью без знания прикладного протокола."},
+        ]
     values = [
         {"setting": "listen", "value": ", ".join(publication.get("listen", [])),
          "meaning": "Адреса, порты и параметры сокета, на которых Nginx принимает соединения.",
@@ -799,6 +882,21 @@ def _publication_finding(severity, rule, publication_id, message, recommendation
 
 def build_publication_summary(publication):
     """Return a concise operator-facing brief for one publication."""
+    if publication.get("publication_type") == "stream":
+        protocol = ", ".join(publication.get("transport_protocols", [])) or "TCP"
+        route = ", ".join(publication.get("upstreams", [])[:2]) or "upstream не найден"
+        exposure = ", ".join(publication.get("declared_visibility", [])) or "не определена"
+        actual = ", ".join(publication.get("actual_visibility", [])) or "не подтверждена"
+        return {
+            "exposure": f"Потенциальная зона: {exposure}; фактическая: {actual}",
+            "purpose": f"Проксирование {protocol} на {route}",
+            "security": f"Оценка {publication.get('score', 0)}/100; HTTP-проверки не применяются",
+            "text": (
+                f"Stream-публикация {protocol} на {', '.join(publication.get('listen', []))}; "
+                f"upstream: {route}. Фактическая зона: {actual}. Проверки HTTP-заголовков, server_name, location и web-rate-limit "
+                "исключены как неприменимые. Фактическая внешняя доступность уточняется по реестру DNAT и датчикам."
+            ),
+        }
     if publication.get("publication_type") == "protective_default":
         return {
             "exposure": "Защитный системный listener",
@@ -841,7 +939,7 @@ def build_publication_summary(publication):
     }
 
 
-def extract_publications(content, source="uploaded-nginx-config"):
+def _extract_http_publications(content, source="uploaded-nginx-config"):
     """Build a per-server publication inventory and targeted security analytics."""
     publications = []
     http_parent_headers = set()
@@ -873,7 +971,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
         if listens == ["80 (implicit)"]:
             declared_zones = ["internal", "external"]
             visibility_basis = ["Неявный listen *:80: все интерфейсы"]
-        identity_seed = "|".join(sorted(names)) + f"|position:{number}"
+        identity_seed = source + "|" + "|".join(sorted(names)) + f"|position:{number}"
         publication_id = "pub-" + hashlib.sha256(identity_seed.encode("utf-8")).hexdigest()[:12]
         tls = bool(re.search(r"\blisten\s+[^;]*(?:443|\bssl\b)[^;]*;|\bssl_certificate\s+", clean, re.I))
         external_possible = "external" in declared_zones
@@ -881,6 +979,11 @@ def extract_publications(content, source="uploaded-nginx-config"):
             any("default_server" in value for value in listens)
             and re.search(r"\breturn\s+(?:403|404|444)\s*;", clean, re.I)
             and not upstreams
+        )
+        redirect_only = bool(
+            re.search(r"\b(?:return\s+30[1278]\s+|rewrite\s+[^;]+\s+(?:redirect|permanent)\s*;)", clean, re.I)
+            and not upstreams
+            and not locations
         )
         findings = []
 
@@ -910,13 +1013,21 @@ def extract_publications(content, source="uploaded-nginx-config"):
                     or (directive == "return" and re.match(r"30[1278]\s+", value))
                     or (directive == "rewrite" and re.search(r"\s(?:redirect|permanent)\s*$", value, re.I))
                 )
-                if sensitive_sink and REQUEST_CONTROLLED_VARIABLE.search(value):
+                if sensitive_sink and _has_unsafe_response_variable(value):
                     splitting_evidence.append(f"{directive} {value}")
         if splitting_evidence:
             findings.append(_publication_finding("high", "publication-http-splitting", publication_id,
                 "Данные запроса используются при формировании заголовка или перенаправления",
                 "Не отражайте $http_*, $arg_*, $cookie_* и URI-переменные в add_header/redirect. Используйте строгий map/allowlist либо фиксированное значение.",
                 "HTTP splitting / КК", "; ".join(splitting_evidence[:3])))
+
+        redirect_host_values = [value for value in _directive_values_clean(clean, "return")
+                                if re.match(r"30[1278]\s+", value) and "$http_host" in value.lower()]
+        if redirect_host_values:
+            findings.append(_publication_finding("medium", "publication-untrusted-redirect-host", publication_id,
+                "Redirect формируется из исходного заголовка Host клиента",
+                "Используйте фиксированное каноническое имя или $server_name; неизвестные Host направляйте в защитный default_server.",
+                "Host / КК", redirect_host_values[0]))
 
         server_scope = _mask_named_blocks(block, "location")
         server_scope_clean = "\n".join(strip_comments(line) for line in server_scope.splitlines())
@@ -977,7 +1088,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
                     "Не используйте Referer как единственный механизм авторизации или CSRF-защиты. Удалите none/blocked, если запросы без доверенного Referer должны отклоняться.",
                     "CSRF / КК", " ".join(unsafe)))
 
-        if external_possible and not tls and not reject_only:
+        if external_possible and not tls and not reject_only and not redirect_only:
             findings.append(_publication_finding("high", "publication-cleartext", publication_id,
                 "Публикация потенциально доступна снаружи без TLS",
                 "Настройте HTTPS, перенаправляйте HTTP на HTTPS и защитите ключи/сертификаты.", "ЗКС.1", ", ".join(listens)))
@@ -1002,7 +1113,7 @@ def extract_publications(content, source="uploaded-nginx-config"):
             findings.append(_publication_finding("high", "publication-sensitive-endpoint-open", publication_id,
                 "Служебный endpoint потенциально опубликован без ограничения доступа",
                 "Ограничьте endpoint сетевым allowlist и сильной аутентификацией; предпочтительно вынесите во внутренний vhost.", "УПД / ЗВТ.2"))
-        if external_possible and not reject_only and not re.search(r"\blimit_req\s+", clean, re.I):
+        if external_possible and not reject_only and not redirect_only and not re.search(r"\blimit_req\s+", clean, re.I):
             findings.append(_publication_finding("low", "publication-rate-limit-missing", publication_id,
                 "Не найдено ограничение частоты запросов для внешней публикации",
                 "Настройте limit_req_zone/limit_req по профилю нагрузки либо зафиксируйте эквивалентную защиту на WAF/LB.", "ЗОО.5"))
@@ -1070,6 +1181,176 @@ def extract_publications(content, source="uploaded-nginx-config"):
         publication["setting_explanations"] = build_publication_setting_explanations(publication)
         publications.append(publication)
     return publications
+
+
+def _extract_stream_publications(content, source="uploaded-nginx-config"):
+    """Extract TCP/UDP stream listeners without applying HTTP-only controls."""
+    publications = []
+    for number, (start, _, end) in enumerate(_named_block_ranges(content, "server"), 1):
+        block = content[start:end].strip()
+        clean = "\n".join(strip_comments(line) for line in block.splitlines())
+        listens = _directive_values_clean(clean, "listen")
+        upstreams = _directive_values_clean(clean, "proxy_pass")
+        # Upstream member declarations are `server host;` without a block. A
+        # stream listener has listen/proxy_pass and is the only relevant object.
+        if not listens and not upstreams:
+            continue
+        listens = listens or ["не задан"]
+        transports = sorted({"udp" if re.search(r"(?:^|\s)udp(?:\s|$)", value, re.I) else "tcp"
+                             for value in listens})
+        declared_zones, visibility_basis = _listen_visibility([value for value in listens if value != "не задан"])
+        tls = bool(re.search(r"\blisten\s+[^;]*\bssl\b[^;]*;|\bssl_certificate\s+", clean, re.I))
+        publication_id = "pub-" + hashlib.sha256(
+            f"stream|{source}|{number}|{'|'.join(listens)}".encode("utf-8")
+        ).hexdigest()[:12]
+        tracked_settings = {}
+        for name in ("proxy_connect_timeout", "proxy_timeout", "proxy_protocol", "ssl_protocols", "access_log"):
+            values = _directive_values_clean(clean, name)
+            if values:
+                tracked_settings[name] = values
+        canonical = {
+            "server_names": ["stream:" + os.path.basename(source)],
+            "listen": sorted(listens), "tls": tls, "publication_type": "stream",
+            "transport_protocols": transports, "upstreams": sorted(upstreams), "locations": [],
+            "declared_visibility": declared_zones, "tracked_settings": tracked_settings,
+            "semantic_digest": hashlib.sha256(" ".join(clean.split()).encode("utf-8")).hexdigest(),
+        }
+        fingerprint = hashlib.sha256(json.dumps(canonical, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        publication = {
+            "id": publication_id, "number": number, "source": source,
+            "line_start": content.count("\n", 0, start) + 1,
+            "server_names": canonical["server_names"], "listen": listens, "tls": tls,
+            "publication_type": "stream", "transport_protocols": transports,
+            "upstreams": upstreams, "locations": [],
+            "declared_visibility": declared_zones, "visibility_basis": visibility_basis,
+            "actual_visibility": [], "addresses": {}, "registry_matches": [],
+            "config_excerpt": block, "findings": [], "score": 100,
+            "analytics": {
+                "finding_counts": {severity: 0 for severity in ("critical", "high", "medium", "low")},
+                "controls_requiring_attention": [],
+                "attack_surface": {"locations": 0, "upstreams": len(upstreams)},
+                "tracked_settings": tracked_settings,
+            },
+            "fingerprint": fingerprint, "canonical": canonical,
+        }
+        publication["summary"] = build_publication_summary(publication)
+        publication["setting_explanations"] = build_publication_setting_explanations(publication)
+        publications.append(publication)
+    return publications
+
+
+def extract_publications(content, source="uploaded-nginx-config"):
+    sections = split_config_bundle(content)
+    if not sections:
+        return _extract_http_publications(content, source)
+    publications = []
+    for section in sections:
+        extractor = _extract_stream_publications if section["context"] == "stream" else _extract_http_publications
+        values = extractor(section["content"], section["path"])
+        for publication in values:
+            publication["line_start"] += section["line_offset"]
+            for item in publication["findings"]:
+                item["line"] = publication["line_start"]
+        publications.extend(values)
+    return publications
+
+
+def _listen_endpoint(value):
+    tokens = value.split()
+    if not tokens or tokens[0].startswith("unix:"):
+        return None
+    endpoint = tokens[0]
+    protocol = "udp" if any(token.lower() == "udp" for token in tokens[1:]) else "tcp"
+    host = "0.0.0.0"
+    port_text = endpoint
+    if endpoint.startswith("[") and "]:" in endpoint:
+        host, port_text = endpoint[1:].split("]:", 1)
+    elif endpoint.count(":") == 1:
+        host, port_text = endpoint.rsplit(":", 1)
+    if "-" in port_text:
+        first, last = port_text.split("-", 1)
+        if first.isdigit() and last.isdigit():
+            return host, int(first), int(last), protocol
+    if port_text.isdigit():
+        return host, int(port_text), int(port_text), protocol
+    return None
+
+
+def correlate_external_registry(publications, registry):
+    """Match DNAT rules conservatively to listeners and mark confirmed external exposure."""
+    if not registry:
+        return publications, None, []
+    listener_index = []
+    for publication in publications:
+        protocols = publication.get("transport_protocols") or ["tcp"]
+        for value in publication.get("listen", []):
+            endpoint = _listen_endpoint(value)
+            if endpoint:
+                listener_index.append((publication, endpoint, protocols))
+
+    findings = []
+    matched = 0
+    ambiguous = 0
+    unmatched = 0
+    for rule in registry.get("rules", []):
+        candidates = []
+        internal_port = rule.get("internal_port")
+        for publication, (host, first, last, protocol), protocols in listener_index:
+            if rule["protocol"] != "any" and rule["protocol"] != protocol:
+                continue
+            if rule["protocol"] != "any" and rule["protocol"] not in protocols:
+                continue
+            explicit_ip = host not in {"", "*", "0.0.0.0", "::"}
+            ip_match = explicit_ip and host == rule["internal_ip"]
+            port_match = internal_port == "any" or first <= internal_port <= last
+            if ip_match and port_match:
+                candidates.append((publication, "ip_port_protocol"))
+            elif not explicit_ip and internal_port != "any" and port_match:
+                candidates.append((publication, "port_protocol"))
+
+        unique = {publication["id"]: (publication, confidence) for publication, confidence in candidates}
+        exact = [value for value in unique.values() if value[1] == "ip_port_protocol"]
+        selected = exact if exact else list(unique.values())
+        if len(selected) == 1:
+            publication, confidence = selected[0]
+            endpoint = rule.get("external_network") or rule.get("source_interface") or "внешний интерфейс"
+            if rule.get("external_port") != "any":
+                endpoint += ":" + str(rule["external_port"])
+            publication.setdefault("registry_matches", []).append({
+                "rule_id": rule["rule_id"], "external_endpoint": endpoint,
+                "internal_endpoint": f"{rule['internal_ip']}:{rule['internal_port']}",
+                "protocol": rule["protocol"], "confidence": confidence,
+            })
+            publication["actual_visibility"] = sorted(set(publication.get("actual_visibility", [])) | {"external"})
+            publication.setdefault("addresses", {}).setdefault("external", [])
+            publication["addresses"]["external"] = sorted(set(publication["addresses"]["external"]) | {endpoint})
+            publication["summary"] = build_publication_summary(publication)
+            matched += 1
+        elif selected:
+            ambiguous += 1
+            findings.append(finding(
+                "low", "external-registry-ambiguous", "DNAT:" + rule["rule_id"],
+                "Правило внешней публикации соответствует нескольким listener Nginx",
+                f"{rule['internal_ip']}:{rule['internal_port']}/{rule['protocol']}; кандидатов: {len(selected)}",
+            ))
+        else:
+            unmatched += 1
+            findings.append(finding(
+                "medium", "external-registry-unmatched", "DNAT:" + rule["rule_id"],
+                "Для правила внешней публикации не найден однозначный listener Nginx",
+                f"{rule['internal_ip']}:{rule['internal_port']}/{rule['protocol']}",
+            ))
+    summary = {
+        "source": registry.get("source"), "sheet": registry.get("sheet"),
+        "total": len(registry.get("rules", [])), "matched": matched,
+        "ambiguous": ambiguous, "unmatched": unmatched,
+        "duplicates_ignored": registry.get("duplicates_ignored", 0),
+        "matching_note": (
+            "Однозначное сопоставление выполняется по IP/порту/протоколу; для wildcard-listen — только "
+            "по уникальной паре порт/протокол. Неоднозначные совпадения не подтверждают внешнюю видимость."
+        ),
+    }
+    return publications, summary, findings
 
 
 def correlate_publications(publications, inventory, resources):
