@@ -17,27 +17,30 @@ from audit import (
     build_publication_baseline,
     build_corrected_nginx_config,
     compare_publication_baseline,
-    correlate_publications,
+    correlate_external_registry, correlate_publications,
     extract_publications,
     now_utc,
+    split_config_bundle,
     validate_inventory,
 )
 from web.pdf_report import generate_pdf_report
+from web.external_registry import parse_external_registry_xlsx
 from web.sarif_report import generate_sarif_report
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.6.0"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
 ALLOWED_JSON_SUFFIXES = {".json"}
+ALLOWED_EXTERNAL_REGISTRY_SUFFIXES = {".xlsx"}
 
 app = FastAPI(
     title="NGINX Scope",
     description="Аудит конфигураций Nginx и областей сетевой видимости",
-    version="1.5.2",
+    version="1.6.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -104,6 +107,30 @@ async def read_upload(upload: UploadFile, allowed_suffixes=None, required=True, 
                                "Преобразуйте текст в кодировку UTF-8 и повторите проверку") from exc
 
 
+async def read_binary_upload(upload: UploadFile, allowed_suffixes, required=False):
+    if upload is None or not upload.filename:
+        if required:
+            raise upload_rejection(400, "file_missing", "Обязательный файл не передан")
+        return None
+    suffix = Path(upload.filename).suffix.lower()
+    if suffix not in allowed_suffixes:
+        raise upload_rejection(415, "unsupported_extension",
+                               f"Недопустимое расширение: {suffix or 'без расширения'}", upload,
+                               "Для реестра внешних публикаций используйте файл .xlsx")
+    chunks = []
+    total = 0
+    while True:
+        chunk = await upload.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise upload_rejection(413, "file_too_large",
+                                   f"Размер файла превышает лимит {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ", upload)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def parse_json_payload(text, label):
     if text is None:
         return None
@@ -121,13 +148,58 @@ def score_for(findings):
     return max(0, 100 - sum(penalties.get(item.get("severity", "info"), 0) for item in findings))
 
 
+def group_findings(findings):
+    """Collapse repeated rule notifications while retaining counts and affected objects."""
+    grouped = {}
+    resource_sets = {}
+    for item in findings:
+        key = (item.get("severity"), item.get("rule"), item.get("recommendation"), item.get("control"))
+        if key not in grouped:
+            value = dict(item)
+            value["occurrences"] = 0
+            value["affected_resources"] = []
+            value["evidence_samples"] = []
+            grouped[key] = value
+            resource_sets[key] = set()
+        value = grouped[key]
+        value["occurrences"] += int(item.get("occurrences", 1))
+        resources = item.get("affected_resources") or [item.get("resource")]
+        for resource in resources:
+            if resource:
+                resource_sets[key].add(resource)
+                if resource not in value["affected_resources"] and len(value["affected_resources"]) < 25:
+                    value["affected_resources"].append(resource)
+        evidence_values = item.get("evidence_samples") or [item.get("evidence")]
+        for evidence in evidence_values:
+            if evidence and evidence not in value["evidence_samples"] and len(value["evidence_samples"]) < 5:
+                value["evidence_samples"].append(evidence)
+    result = []
+    for key, value in grouped.items():
+        value["affected_resource_count"] = len(resource_sets[key])
+        if value["occurrences"] > 1:
+            value["resource"] = f"{value['occurrences']} срабатываний; объектов: {value['affected_resource_count']}"
+            value["evidence"] = "; ".join(value["evidence_samples"]) or value.get("evidence", "")
+        result.append(value)
+    result.sort(key=lambda item: (-SEVERITY_ORDER.get(item.get("severity", "info"), 0), item.get("rule", "")))
+    return result
+
+
 def analyze_config_bundle(config_text, source_name):
     """Run CPU-heavy parsing outside the asynchronous request loop."""
     config_findings = analyze_nginx_text(config_text, source_name)
     publications = extract_publications(config_text, source_name)
     config_findings.extend(item for publication in publications for item in publication["findings"])
     corrected_config, applied_fixes, manual_actions = build_corrected_nginx_config(config_text)
-    return config_findings, publications, corrected_config, applied_fixes, manual_actions
+    sections = split_config_bundle(config_text)
+    bundle_summary = None
+    if sections:
+        bundle_summary = {
+            "format": "labeled-multi-file",
+            "sections": len(sections),
+            "http_sections": sum(1 for item in sections if item["context"] == "http"),
+            "stream_sections": sum(1 for item in sections if item["context"] == "stream"),
+        }
+    return config_findings, publications, corrected_config, applied_fixes, manual_actions, bundle_summary
 
 
 def build_report(config_findings, inventory=None, sensors=None, corrected_config=None,
@@ -147,12 +219,16 @@ def build_report(config_findings, inventory=None, sensors=None, corrected_config
         findings.extend(aggregate["findings"])
         sensor_times = aggregate["sensors"]
     findings.sort(key=lambda item: (-SEVERITY_ORDER.get(item.get("severity", "info"), 0), item.get("rule", "")))
+    occurrence_counts = {name: sum(1 for item in findings if item.get("severity") == name) for name in SEVERITY_ORDER}
+    findings = group_findings(findings)
     counts = {name: sum(1 for item in findings if item.get("severity") == name) for name in SEVERITY_ORDER}
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now_utc(),
         "score": score_for(findings),
         "summary": counts,
+        "occurrence_summary": occurrence_counts,
+        "finding_occurrences": sum(occurrence_counts.values()),
         "findings": findings,
         "resources": resources,
         "sensors": sensor_times,
@@ -231,19 +307,32 @@ async def analyze(
     inventory: Optional[UploadFile] = File(None),
     external_sensor: Optional[UploadFile] = File(None),
     internal_sensor: Optional[UploadFile] = File(None),
+    external_registry: Optional[UploadFile] = File(None),
     baseline: Optional[UploadFile] = File(None),
 ):
     config_text = await read_upload(nginx_config)
     inventory_text = await read_upload(inventory, ALLOWED_JSON_SUFFIXES, required=False)
     external_text = await read_upload(external_sensor, ALLOWED_JSON_SUFFIXES, required=False)
     internal_text = await read_upload(internal_sensor, ALLOWED_JSON_SUFFIXES, required=False)
+    external_registry_raw = await read_binary_upload(
+        external_registry, ALLOWED_EXTERNAL_REGISTRY_SUFFIXES, required=False
+    )
     baseline_text = await read_upload(baseline, ALLOWED_JSON_SUFFIXES, required=False)
     source_name = Path(nginx_config.filename or "uploaded.conf").name[:160]
-    config_findings, publications, corrected_config, applied_fixes, manual_actions = await run_in_threadpool(
+    config_findings, publications, corrected_config, applied_fixes, manual_actions, bundle_summary = await run_in_threadpool(
         analyze_config_bundle, config_text, source_name
     )
     inventory_data = parse_json_payload(inventory_text, "inventory")
     baseline_data = parse_json_payload(baseline_text, "эталоне")
+    registry_data = None
+    if external_registry_raw is not None:
+        try:
+            registry_data = await run_in_threadpool(
+                parse_external_registry_xlsx, external_registry_raw,
+                Path(external_registry.filename or "external-publications.xlsx").name[:160],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Ошибка реестра внешних публикаций: " + str(exc)) from exc
     sensors = []
     for text, expected_zone in ((external_text, "external"), (internal_text, "internal")):
         sensor = parse_json_payload(text, f"датчике {expected_zone}")
@@ -257,6 +346,21 @@ async def analyze(
     report = build_report(config_findings, inventory_data, sensors, corrected_config,
                           applied_fixes, manual_actions)
     publications = correlate_publications(publications, inventory_data, report["resources"])
+    publications, registry_summary, registry_findings = correlate_external_registry(publications, registry_data)
+    if registry_findings:
+        report["findings"].extend(group_findings(registry_findings))
+        report["findings"].sort(
+            key=lambda item: (-SEVERITY_ORDER.get(item.get("severity", "info"), 0), item.get("rule", ""))
+        )
+        report["summary"] = {name: sum(1 for item in report["findings"] if item.get("severity") == name)
+                             for name in SEVERITY_ORDER}
+        report["score"] = score_for(report["findings"])
+        report["finding_occurrences"] += len(registry_findings)
+        for item in registry_findings:
+            severity = item.get("severity", "info")
+            report["occurrence_summary"][severity] = report["occurrence_summary"].get(severity, 0) + 1
+    report["external_registry"] = registry_summary
+    report["config_bundle"] = bundle_summary
     try:
         comparison = compare_publication_baseline(publications, baseline_data)
     except (ValueError, KeyError, TypeError) as exc:
