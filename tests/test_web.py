@@ -2,6 +2,7 @@ import io
 import json
 
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 
 from web.app import app
 
@@ -9,12 +10,26 @@ from web.app import app
 client = TestClient(app)
 
 
+def external_registry_xlsx(rows):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Лист1"
+    sheet.append(["№ п/п", "ID правила", "Тип", "Источник / Интерфейс", "Внешний порт",
+                  "Внутренний IP", "Внутренний порт", "Протокол"])
+    for row in rows:
+        sheet.append(row)
+    output = io.BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
 def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.5.2"
-    assert response.headers["x-nginx-scope-version"] == "1.5.2"
+    assert response.json()["version"] == "1.6.0"
+    assert response.headers["x-nginx-scope-version"] == "1.6.0"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -82,7 +97,7 @@ def test_sarif_export_for_ci_cd():
     assert response.headers["content-type"].startswith("application/sarif+json")
     payload = response.json()
     assert payload["version"] == "2.1.0"
-    assert payload["runs"][0]["tool"]["driver"]["version"] == "1.5.2"
+    assert payload["runs"][0]["tool"]["driver"]["version"] == "1.6.0"
     result = next(item for item in payload["runs"][0]["results"] if item["ruleId"] == "publication-dynamic-upstream-ssrf")
     assert result["level"] == "error"
     assert result["locations"][0]["physicalLocation"]["region"]["startLine"] > 0
@@ -137,6 +152,41 @@ def test_config_only_with_empty_optional_uploads_is_accepted():
     })
     assert response.status_code == 200
     assert response.json()["resources"] == []
+
+
+def test_external_publication_xlsx_marks_exact_listener_as_external():
+    registry = external_registry_xlsx([
+        [1, 229430, "DNAT", "Internet-203.0.113.0-24", 9443, "10.0.0.10", 8443, "tcp"],
+    ])
+    config = b"events {} http { server { listen 10.0.0.10:8443 ssl; server_name app.example; } }"
+    response = client.post("/api/analyze", files={
+        "nginx_config": ("nginx.conf", config, "text/plain"),
+        "external_registry": ("external.xlsx", registry,
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    })
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["external_registry"]["matched"] == 1
+    assert payload["external_registry"]["unmatched"] == 0
+    assert payload["publications"][0]["actual_visibility"] == ["external"]
+    assert payload["publications"][0]["registry_matches"][0]["rule_id"] == "229430"
+
+
+def test_repeated_publication_findings_are_grouped_in_top_level_report():
+    config = b"events {} http { server { listen 8080; server_name a.example; } server { listen 8081; server_name b.example; } }"
+    registry = external_registry_xlsx([
+        [1, 229431, "DNAT", "Internet-203.0.113.0-24", 9999, "10.0.0.10", 9999, "tcp"],
+    ])
+    payload = client.post("/api/analyze", files={
+        "nginx_config": ("nginx.conf", config, "text/plain"),
+        "external_registry": ("external.xlsx", registry,
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    }).json()
+    rate_limit = [item for item in payload["findings"] if item["rule"] == "publication-rate-limit-missing"]
+    assert len(rate_limit) == 1
+    assert rate_limit[0]["occurrences"] == 2
+    assert rate_limit[0]["affected_resource_count"] == 2
+    assert payload["finding_occurrences"] > len(payload["findings"])
 
 
 def test_sensor_requires_inventory():
