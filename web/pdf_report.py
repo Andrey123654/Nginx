@@ -119,10 +119,11 @@ def _section_banner(title, styles):
 def _finding_card(item, styles):
     severity = item.get("severity", "info")
     severity_label = {"critical": "КРИТИЧЕСКИЙ", "high": "ВЫСОКИЙ", "medium": "СРЕДНИЙ", "low": "НИЗКИЙ", "info": "ИНФО"}.get(severity, severity.upper())
+    occurrence = f" | Повторений: {item.get('occurrences')}" if item.get("occurrences", 1) > 1 else ""
     content = [
         Paragraph(f"<b>{_text(item.get('message'))}</b>", styles["finding"]),
         Paragraph(f"Рекомендация: {_text(item.get('recommendation'))}", styles["finding"]),
-        Paragraph(f"Правило: {_text(item.get('rule'))} | Объект: {_text(item.get('resource'))} | Контроль: {_text(item.get('control'))}", styles["small"]),
+        Paragraph(f"Правило: {_text(item.get('rule'))} | Объект: {_text(item.get('resource'))} | Контроль: {_text(item.get('control'))}{occurrence}", styles["small"]),
     ]
     if item.get("evidence"):
         content.append(Paragraph(f"Свидетельство: {_text(item['evidence'])}", styles["small"]))
@@ -206,6 +207,24 @@ def generate_pdf_report(report):
                                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
                                        ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
     story.extend([summary_table, Spacer(1, 5 * mm), _section_banner("2. Замечания и рекомендации", styles), Spacer(1, 3 * mm)])
+    bundle = report.get("config_bundle")
+    if bundle:
+        story.extend([_meta_table([
+            ("Формат конфигурации", "Многофайловая выгрузка"),
+            ("Секций", bundle.get("sections")),
+            ("HTTP-секций", bundle.get("http_sections")),
+            ("Stream-секций", bundle.get("stream_sections")),
+        ], styles), Spacer(1, 4 * mm)])
+    registry = report.get("external_registry")
+    if registry:
+        story.extend([_meta_table([
+            ("Реестр внешних публикаций", registry.get("source")),
+            ("Правил DNAT", registry.get("total")),
+            ("Сопоставлено", registry.get("matched")),
+            ("Неоднозначно", registry.get("ambiguous")),
+            ("Не найдено", registry.get("unmatched")),
+            ("Метод сопоставления", registry.get("matching_note")),
+        ], styles), Spacer(1, 4 * mm)])
     findings = report.get("findings", [])
     if findings:
         for item in findings:
