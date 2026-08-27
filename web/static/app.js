@@ -46,7 +46,7 @@ function render(report) {
 
   document.querySelector('#findings-body').innerHTML = report.findings.map(item => `<tr>
     <td><span class="badge ${esc(item.severity)}">${esc(severityName(item.severity))}</span></td>
-    <td><b>${esc(item.message)}</b><small>${esc(item.rule)}</small></td>
+    <td><b>${esc(item.message)}</b><small>${esc(item.rule)}${item.occurrences > 1 ? ` · повторений: ${esc(item.occurrences)}` : ''}</small></td>
     <td class="recommendation">${esc(item.recommendation || 'Требуется анализ владельцем ресурса')}${referenceLinks(item)}</td>
     <td class="mono">${esc(item.resource)}</td><td class="evidence">${esc(item.evidence || '—')}</td></tr>`).join('');
   document.querySelector('#findings-empty').hidden = report.findings.length > 0;
@@ -59,13 +59,22 @@ function render(report) {
     const settingHelp = `<details class="setting-guide"><summary>Что означают основные настройки публикации</summary>${(item.setting_explanations || []).map(setting => `<div><b>${esc(setting.setting)}: ${esc(setting.value)}</b><span>${esc(setting.meaning)} ${esc(setting.impact)}</span></div>`).join('')}</details>`;
     const locations = item.locations.length ? `<div class="location-list"><b>Настройки location</b>${item.locations.map(location => `<details><summary>${esc(location.path)} · ${esc(location.explanation?.match_type || '')}</summary><div class="location-explanation"><b>Что это и как выбирается</b><p>${esc(location.explanation?.matching || 'Пояснение недоступно')}</p>${(location.explanation?.directives || []).map(directive => `<div><code>${esc(directive.name)} ${esc(directive.value)}</code><span><b>${esc(directive.title)}.</b> ${esc(directive.impact)}</span></div>`).join('')}</div><pre class="config-view">${esc(location.config_excerpt)}</pre></details>`).join('')}</div>` : '';
     return `<article class="publication-card">
-      <header class="publication-head"><div><h3>${esc(item.server_names.join(', '))}</h3><p>${esc(item.id)} · строка ${esc(item.line_start)} · ${item.publication_type === 'protective_default' ? 'защитный catch-all' : item.tls ? 'HTTPS/TLS' : 'HTTP'}</p></div><div class="publication-score"><b>${esc(item.score)}</b><span>оценка</span></div></header>
+      <header class="publication-head"><div><h3>${esc(item.server_names.join(', '))}</h3><p>${esc(item.id)} · ${esc(item.source || 'загруженный конфиг')} · строка ${esc(item.line_start)} · ${item.publication_type === 'stream' ? `STREAM ${(item.transport_protocols || []).join('/').toUpperCase()}` : item.publication_type === 'protective_default' ? 'защитный catch-all' : item.tls ? 'HTTPS/TLS' : 'HTTP'}</p></div><div class="publication-score"><b>${esc(item.score)}</b><span>оценка</span></div></header>
       <section class="publication-summary"><b>Краткая справка</b><p>${esc(item.summary?.text || 'Резюме недоступно')}</p><div><span>${esc(item.summary?.exposure || '—')}</span><span>${esc(item.summary?.purpose || '—')}</span><span>${esc(item.summary?.security || '—')}</span></div></section>
       <div class="publication-meta"><div><b>Listen</b><span>${esc(item.listen.join(', '))}</span></div><div><b>Потенциальная зона</b><span>${declared}</span></div><div><b>Фактически по датчикам</b><span>${actual}</span></div><div><b>Адреса / upstream</b><span>${addresses}<br>${esc(item.upstreams.join(', ') || 'upstream не найден')}</span></div></div>${settingHelp}
       <div class="publication-body"><pre class="config-view">${esc(item.config_excerpt)}</pre><div class="publication-findings">${findings}</div></div>${locations}
     </article>`;
   }).join('');
   document.querySelector('#publications-empty').hidden = report.publications.length > 0;
+
+  const registry = report.external_registry;
+  const bundle = report.config_bundle;
+  const registrySummary = document.querySelector('#registry-summary');
+  registrySummary.hidden = !registry && !bundle;
+  registrySummary.innerHTML = [
+    bundle ? `<b>Многофайловая выгрузка:</b> секций ${esc(bundle.sections)}, HTTP ${esc(bundle.http_sections)}, stream ${esc(bundle.stream_sections)}.` : '',
+    registry ? `<b>Реестр внешних публикаций:</b> правил ${esc(registry.total)}, сопоставлено ${esc(registry.matched)}, неоднозначно ${esc(registry.ambiguous)}, не найдено ${esc(registry.unmatched)}. <span>${esc(registry.matching_note)}</span>` : '',
+  ].filter(Boolean).join('<br>');
 
   document.querySelector('#visibility-body').innerHTML = report.resources.map(item => {
     const addresses = Object.entries(item.addresses || {}).map(([zone, ips]) => `${zoneName(zone)}: ${(ips || []).join(', ') || '—'}`).join('<br>');
@@ -92,7 +101,7 @@ form.addEventListener('submit', async event => {
   try {
     const payload = new FormData();
     if (configFile) payload.append('nginx_config', configFile);
-    for (const field of ['inventory', 'external_sensor', 'internal_sensor', 'baseline']) {
+    for (const field of ['inventory', 'external_registry', 'external_sensor', 'internal_sensor', 'baseline']) {
       const optionalFile = form.elements[field].files[0];
       if (optionalFile) payload.append(field, optionalFile);
     }
@@ -184,6 +193,6 @@ document.querySelector('#export-json').addEventListener('click', () => {
 document.querySelector('#export-csv').addEventListener('click', () => {
   if (!currentReport) return;
   const quote = value => `"${String(value ?? '').replaceAll('"','""')}"`;
-  const rows = [['severity','rule','resource','message','recommendation','evidence'], ...currentReport.findings.map(x => [x.severity,x.rule,x.resource,x.message,x.recommendation || '',x.evidence || ''])];
+  const rows = [['severity','rule','occurrences','affected_objects','resource','message','recommendation','evidence'], ...currentReport.findings.map(x => [x.severity,x.rule,x.occurrences || 1,x.affected_resource_count || 1,x.resource,x.message,x.recommendation || '',x.evidence || ''])];
   download('nginx-scope-findings.csv','text/csv;charset=utf-8','\ufeff' + rows.map(row => row.map(quote).join(',')).join('\n'));
 });
