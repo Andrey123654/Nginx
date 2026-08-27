@@ -41,9 +41,10 @@
         </label>
 
         <details class="visibility-files">
-          <summary><span>Добавить данные и эталон</span><small>inventory + датчики + baseline</small></summary>
+          <summary><span>Добавить данные и эталон</span><small>реестр DNAT + inventory + датчики + baseline</small></summary>
           <div class="file-grid">
             <label><span>Реестр ресурсов</span><input name="inventory" type="file" accept=".json"><small>inventory.json</small></label>
+            <label><span>Внешние публикации</span><input name="external_registry" type="file" accept=".xlsx"><small>реестр DNAT в формате .xlsx</small></label>
             <label><span>Внешний датчик</span><input name="external_sensor" type="file" accept=".json"><small>external/sensor.json</small></label>
             <label><span>Внутренний датчик</span><input name="internal_sensor" type="file" accept=".json"><small>internal/sensor.json</small></label>
             <label><span>Эталон конфигурации</span><input name="baseline" type="file" accept=".json"><small>nginx-baseline.json</small></label>
@@ -78,6 +79,7 @@
         <div class="metric medium"><b id="count-medium">0</b><span>Средних</span></div>
         <div class="metric low"><b id="count-low">0</b><span>Низких</span></div>
       </div>
+      <div id="registry-summary" class="comparison-summary" hidden></div>
 
       <nav class="tabs" aria-label="Разделы отчёта">
         <button class="active" type="button" data-tab="findings">Замечания <span id="findings-total">0</span></button>
@@ -98,7 +100,7 @@
 
       <div id="visibility-panel" class="tab-panel" hidden>
         <div class="table-wrap"><table><thead><tr><th>Ресурс</th><th>Ожидалось</th><th>Фактически</th><th>Адреса</th><th>Статус</th></tr></thead><tbody id="visibility-body"></tbody></table></div>
-        <div id="visibility-empty" class="empty" hidden><b>Нет данных о периметрах</b><span>Добавьте inventory.json и отчёты внешнего/внутреннего датчиков.</span></div>
+        <div id="visibility-empty" class="empty" hidden><b>Нет данных о периметрах</b><span>Добавьте реестр внешних публикаций .xlsx либо inventory.json и отчёты датчиков.</span></div>
       </div>
 
       <div id="changes-panel" class="tab-panel" hidden>
@@ -107,7 +109,7 @@
       </div>
     </section>
   </main>
-  <footer><span>NGINX Scope</span><span>Конфигурационный аудит · версия 1.5.2</span></footer>
+  <footer><span>NGINX Scope</span><span>Конфигурационный аудит · версия 1.6.0</span></footer>
   <script src="/static/app.js" defer></script>
 </body>
 </html>
