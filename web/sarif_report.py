@@ -45,6 +45,8 @@ def generate_sarif_report(report):
                 "resource": str(item.get("resource") or ""),
                 "evidence": str(item.get("evidence") or ""),
                 "recommendation": str(item.get("recommendation") or ""),
+                "occurrences": int(item.get("occurrences", 1)),
+                "affectedResources": item.get("affected_resources", []),
             },
         }
         results.append(result)
@@ -56,7 +58,7 @@ def generate_sarif_report(report):
             "tool": {"driver": {
                 "name": "NGINX Scope",
                 "informationUri": "https://github.com/Andrey123654/Nginx",
-                "version": "1.5.2",
+                "version": "1.6.0",
                 "rules": list(rules.values()),
             }},
             "results": results,
