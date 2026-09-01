@@ -214,12 +214,16 @@ def generate_pdf_report(report):
             ("Секций", bundle.get("sections")),
             ("HTTP-секций", bundle.get("http_sections")),
             ("Stream-секций", bundle.get("stream_sections")),
+            ("Отключённых/резервных пропущено", bundle.get("inactive_sections_ignored", 0)),
         ], styles), Spacer(1, 4 * mm)])
     registry = report.get("external_registry")
     if registry:
         story.extend([_meta_table([
-            ("Реестр внешних публикаций", registry.get("source")),
-            ("Правил DNAT", registry.get("total")),
+            ("Выгрузка Edge / DNAT", registry.get("source")),
+            ("Исходных строк", registry.get("source_rows")),
+            ("Уникальных трансляций", registry.get("total")),
+            ("Объединено повторов", registry.get("collapsed_rules")),
+            ("Зоны", registry.get("zone_counts")),
             ("Сопоставлено", registry.get("matched")),
             ("Неоднозначно", registry.get("ambiguous")),
             ("Не найдено", registry.get("unmatched")),
@@ -245,10 +249,21 @@ def generate_pdf_report(report):
             ("Тип", publication.get("publication_type")), ("Listen", publication.get("listen")),
             ("TLS", "включён" if publication.get("tls") else "не включён"),
             ("Потенциальная зона", publication.get("declared_visibility")),
-            ("Фактическая зона", publication.get("actual_visibility") or "нет данных датчиков"),
+            ("Фактическая зона", publication.get("actual_visibility") or "нет данных Edge/датчиков"),
             ("Адреса", publication.get("addresses")), ("Upstream", publication.get("upstreams") or "не найден"),
             ("Оценка", f"{publication.get('score', 0)}/100"),
         ], styles), Spacer(1, 2 * mm)])
+        if publication.get("registry_matches"):
+            story.append(Paragraph("Сопоставленные правила Edge / DNAT", styles["h3"]))
+            for match in publication["registry_matches"]:
+                rule_ids = ", ".join(match.get("rule_ids") or [match.get("rule_id")])
+                scopes = ", ".join(match.get("scope_names", [])) or "не указано"
+                story.append(Paragraph(
+                    f"<b>{_text(rule_ids)}</b>: {_text(match.get('external_endpoint'))} → "
+                    f"{_text(match.get('internal_endpoint'))}/{_text(match.get('protocol'))}; "
+                    f"зона {_text(match.get('visibility'))}; Applied on: {_text(scopes)}",
+                    styles["body"],
+                ))
         for setting in publication.get("setting_explanations", []):
             story.append(Paragraph(f"<b>{_text(setting.get('setting'))}: {_text(setting.get('value'))}</b> - {_text(setting.get('meaning'))} {_text(setting.get('impact'))}", styles["body"]))
         if publication.get("findings"):
