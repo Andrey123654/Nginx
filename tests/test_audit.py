@@ -121,6 +121,17 @@ server { listen 80; server_name app.example; return 301 https://$server_name$req
         self.assertNotIn("add_header", stream_section)
         self.assertTrue(any("разнести" in item for item in manual))
 
+    def test_disabled_and_backup_bundle_sections_are_ignored(self):
+        content = """==> /etc/nginx/disable/old.conf <==
+server { listen 443 ssl; server_name old.example; }
+==> /etc/nginx/conf.d/live.conf <==
+server { listen 443 ssl; server_name live.example; }
+==> /etc/nginx/conf.d/copy.conf.bak <==
+server { listen 443 ssl; server_name backup.example; }
+"""
+        publications = audit.extract_publications(content, "bundle.conf")
+        self.assertEqual([item["server_names"] for item in publications], [["live.example"]])
+
     def test_gixy_derived_rules_are_reported_per_publication(self):
         config = """events {} http {
           add_header X-Content-Type-Options nosniff always;
