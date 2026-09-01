@@ -24,12 +24,28 @@ def external_registry_xlsx(rows):
     return output.getvalue()
 
 
+def edge_registry_xlsx(rows):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "DNAT Rules"
+    sheet.append(["DNAT rules — edge"])
+    sheet.append([])
+    sheet.append(["ID", "Action", "Applied on", "Original IP Address", "Original Port",
+                  "Translated IP Address", "Translated Port", "Protocol", "Enabled"])
+    for row in rows:
+        sheet.append(row)
+    output = io.BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
 def test_healthcheck():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert response.json()["version"] == "1.6.0"
-    assert response.headers["x-nginx-scope-version"] == "1.6.0"
+    assert response.json()["version"] == "1.7.0"
+    assert response.headers["x-nginx-scope-version"] == "1.7.0"
     assert response.headers["x-frame-options"] == "DENY"
 
 
@@ -97,7 +113,7 @@ def test_sarif_export_for_ci_cd():
     assert response.headers["content-type"].startswith("application/sarif+json")
     payload = response.json()
     assert payload["version"] == "2.1.0"
-    assert payload["runs"][0]["tool"]["driver"]["version"] == "1.6.0"
+    assert payload["runs"][0]["tool"]["driver"]["version"] == "1.7.0"
     result = next(item for item in payload["runs"][0]["results"] if item["ruleId"] == "publication-dynamic-upstream-ssrf")
     assert result["level"] == "error"
     assert result["locations"][0]["physicalLocation"]["region"]["startLine"] > 0
@@ -170,6 +186,62 @@ def test_external_publication_xlsx_marks_exact_listener_as_external():
     assert payload["external_registry"]["unmatched"] == 0
     assert payload["publications"][0]["actual_visibility"] == ["external"]
     assert payload["publications"][0]["registry_matches"][0]["rule_id"] == "229430"
+
+
+def test_edge_export_combines_scopes_and_marks_both_visibility_zones():
+    registry = edge_registry_xlsx([
+        [101, "DNAT", "Current edge-internet", "198.51.100.10", 443, "10.0.0.10", 8443, "tcp", "Yes"],
+        [102, "DNAT", "test-network", "198.51.100.10", 443, "10.0.0.10", 8443, "tcp", "Yes"],
+    ])
+    config = b"events {} http { server { listen 10.0.0.10:8443 ssl; server_name app.example; } }"
+    response = client.post("/api/analyze", files={
+        "nginx_config": ("nginx.conf", config, "text/plain"),
+        "external_registry": ("edge.xlsx", registry,
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    })
+    assert response.status_code == 200
+    payload = response.json()
+    summary = payload["external_registry"]
+    assert summary["format"] == "edge"
+    assert summary["source_rows"] == 2
+    assert summary["total"] == 1
+    assert summary["collapsed_rules"] == 1
+    assert summary["zone_counts"]["both"] == 1
+    publication = payload["publications"][0]
+    assert publication["actual_visibility"] == ["external", "internal"]
+    assert publication["registry_matches"][0]["rule_ids"] == ["101", "102"]
+
+
+def test_edge_port_range_matches_stream_listener_and_unmatched_is_not_vulnerability():
+    registry = edge_registry_xlsx([
+        [201, "DNAT", "Current edge-internet", "198.51.100.20", "49000-49100", "10.0.0.20", "49000-49100", "udp", "Yes"],
+        [202, "DNAT", "Current edge-internet", "198.51.100.21", 53, "10.0.0.21", 5355, "udp", "Yes"],
+    ])
+    config = b"==> /etc/nginx/stream.d/media.conf <==\nserver { listen 10.0.0.20:49050 udp; proxy_pass 10.1.0.5:49050; }"
+    payload = client.post("/api/analyze", files={
+        "nginx_config": ("nginx-T", config, "text/plain"),
+        "external_registry": ("edge.xlsx", registry,
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    }).json()
+    assert payload["external_registry"]["matched"] == 1
+    assert payload["external_registry"]["unmatched"] == 1
+    assert "external-registry-unmatched" not in {item["rule"] for item in payload["findings"]}
+
+
+def test_edge_rule_applies_to_all_virtual_servers_on_shared_listener():
+    registry = edge_registry_xlsx([
+        [301, "DNAT", "Current edge-internet", "198.51.100.30", 443, "10.0.0.30", 443, "tcp", "Yes"],
+    ])
+    config = b"events {} http { server { listen 443 ssl; server_name one.example; } server { listen 443 ssl; server_name two.example; } }"
+    payload = client.post("/api/analyze", files={
+        "nginx_config": ("nginx.conf", config, "text/plain"),
+        "external_registry": ("edge.xlsx", registry,
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    }).json()
+    assert payload["external_registry"]["matched"] == 1
+    assert payload["external_registry"]["ambiguous"] == 0
+    assert all(item["actual_visibility"] == ["external"] for item in payload["publications"])
+    assert all(item["registry_matches"][0]["confidence"] == "shared_listener" for item in payload["publications"])
 
 
 def test_repeated_publication_findings_are_grouped_in_top_level_report():
