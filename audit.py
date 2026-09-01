@@ -405,6 +405,10 @@ def split_config_bundle(content):
         path = match.group(1).strip()
         body = content[start:end]
         lowered_path = path.replace("\\", "/").lower()
+        path_parts = {part for part in lowered_path.split("/") if part}
+        inactive = bool(path_parts & {"disable", "disabled", "backup", "backups", "archive"}) or bool(
+            re.search(r"(?:\.disabled|\.bak|\.old|\.orig|\.save|~)$", lowered_path)
+        )
         clean = "\n".join(strip_comments(line) for line in body.splitlines())
         if re.search(r"(?:^|/)stream(?:\.d)?/", lowered_path):
             context = "stream"
@@ -418,6 +422,7 @@ def split_config_bundle(content):
             "path": path,
             "content": body,
             "context": context,
+            "active": not inactive,
             "line_offset": content.count("\n", 0, start),
         })
     return sections
@@ -427,7 +432,8 @@ def _http_audit_content(content):
     sections = split_config_bundle(content)
     if not sections:
         return content
-    return "\n".join(section["content"] for section in sections if section["context"] == "http")
+    return "\n".join(section["content"] for section in sections
+                     if section["context"] == "http" and section.get("active", True))
 
 
 def _has_unsafe_response_variable(value):
@@ -565,7 +571,7 @@ def build_corrected_nginx_config(content):
         manual = []
         for section in sections:
             body = section["content"]
-            if section["context"] == "http":
+            if section.get("active", True) and section["context"] == "http":
                 body, section_applied, section_manual = build_corrected_nginx_config(body)
                 applied.extend(section_applied)
                 manual.extend(section_manual)
@@ -1245,6 +1251,8 @@ def extract_publications(content, source="uploaded-nginx-config"):
         return _extract_http_publications(content, source)
     publications = []
     for section in sections:
+        if not section.get("active", True):
+            continue
         extractor = _extract_stream_publications if section["context"] == "stream" else _extract_http_publications
         values = extractor(section["content"], section["path"])
         for publication in values:
@@ -1276,8 +1284,20 @@ def _listen_endpoint(value):
     return None
 
 
+def _registry_port_overlaps(value, first, last):
+    if value == "any":
+        return True
+    if isinstance(value, int):
+        return first <= value <= last
+    match = re.fullmatch(r"(\d+)-(\d+)", str(value or ""))
+    if match:
+        rule_first, rule_last = int(match.group(1)), int(match.group(2))
+        return max(first, rule_first) <= min(last, rule_last)
+    return False
+
+
 def correlate_external_registry(publications, registry):
-    """Match DNAT rules conservatively to listeners and mark confirmed external exposure."""
+    """Match Edge/DNAT rules to listeners and apply the rule's inferred visibility zones."""
     if not registry:
         return publications, None, []
     listener_index = []
@@ -1302,7 +1322,7 @@ def correlate_external_registry(publications, registry):
                 continue
             explicit_ip = host not in {"", "*", "0.0.0.0", "::"}
             ip_match = explicit_ip and host == rule["internal_ip"]
-            port_match = internal_port == "any" or first <= internal_port <= last
+            port_match = _registry_port_overlaps(internal_port, first, last)
             if ip_match and port_match:
                 candidates.append((publication, "ip_port_protocol"))
             elif not explicit_ip and internal_port != "any" and port_match:
@@ -1311,43 +1331,46 @@ def correlate_external_registry(publications, registry):
         unique = {publication["id"]: (publication, confidence) for publication, confidence in candidates}
         exact = [value for value in unique.values() if value[1] == "ip_port_protocol"]
         selected = exact if exact else list(unique.values())
-        if len(selected) == 1:
-            publication, confidence = selected[0]
-            endpoint = rule.get("external_network") or rule.get("source_interface") or "внешний интерфейс"
+        if selected:
+            endpoint = rule.get("external_network") or "адрес не указан"
             if rule.get("external_port") != "any":
                 endpoint += ":" + str(rule["external_port"])
-            publication.setdefault("registry_matches", []).append({
-                "rule_id": rule["rule_id"], "external_endpoint": endpoint,
-                "internal_endpoint": f"{rule['internal_ip']}:{rule['internal_port']}",
-                "protocol": rule["protocol"], "confidence": confidence,
-            })
-            publication["actual_visibility"] = sorted(set(publication.get("actual_visibility", [])) | {"external"})
-            publication.setdefault("addresses", {}).setdefault("external", [])
-            publication["addresses"]["external"] = sorted(set(publication["addresses"]["external"]) | {endpoint})
-            publication["summary"] = build_publication_summary(publication)
+            zones = set(rule.get("visibility") or ["external"])
+            rule_ids = rule.get("rule_ids") or [rule["rule_id"]]
+            shared_socket = len(selected) > 1
+            for publication, confidence in selected:
+                publication.setdefault("registry_matches", []).append({
+                    "rule_id": rule["rule_id"], "rule_ids": rule_ids,
+                    "external_endpoint": endpoint,
+                    "internal_endpoint": f"{rule['internal_ip']}:{rule['internal_port']}",
+                    "protocol": rule["protocol"],
+                    "confidence": "shared_listener" if shared_socket else confidence,
+                    "visibility": sorted(zones), "scope_names": rule.get("scope_names", []),
+                    "visibility_evidence": rule.get("visibility_evidence", []),
+                })
+                publication["actual_visibility"] = sorted(set(publication.get("actual_visibility", [])) | zones)
+                for zone in zones:
+                    publication.setdefault("addresses", {}).setdefault(zone, [])
+                    publication["addresses"][zone] = sorted(set(publication["addresses"][zone]) | {endpoint})
+                publication["summary"] = build_publication_summary(publication)
             matched += 1
-        elif selected:
-            ambiguous += 1
-            findings.append(finding(
-                "low", "external-registry-ambiguous", "DNAT:" + rule["rule_id"],
-                "Правило внешней публикации соответствует нескольким listener Nginx",
-                f"{rule['internal_ip']}:{rule['internal_port']}/{rule['protocol']}; кандидатов: {len(selected)}",
-            ))
         else:
             unmatched += 1
-            findings.append(finding(
-                "medium", "external-registry-unmatched", "DNAT:" + rule["rule_id"],
-                "Для правила внешней публикации не найден однозначный listener Nginx",
-                f"{rule['internal_ip']}:{rule['internal_port']}/{rule['protocol']}",
-            ))
     summary = {
         "source": registry.get("source"), "sheet": registry.get("sheet"),
+        "format": registry.get("format"), "source_rows": registry.get("source_rows"),
         "total": len(registry.get("rules", [])), "matched": matched,
         "ambiguous": ambiguous, "unmatched": unmatched,
         "duplicates_ignored": registry.get("duplicates_ignored", 0),
+        "collapsed_rules": registry.get("collapsed_rules", 0),
+        "disabled_ignored": registry.get("disabled_ignored", 0),
+        "non_dnat_ignored": registry.get("non_dnat_ignored", 0),
+        "zone_counts": registry.get("zone_counts", {}),
         "matching_note": (
-            "Однозначное сопоставление выполняется по IP/порту/протоколу; для wildcard-listen — только "
-            "по уникальной паре порт/протокол. Неоднозначные совпадения не подтверждают внешнюю видимость."
+            "Зона выводится из Applied on: Internet/Outside — наружу, другие именованные области — "
+            "внутренний контур. Одинаковые трансляции объединяются. Сопоставление выполняется по "
+            "Translated IP/Port/Protocol. Все virtual server общего listener получают одну сетевую зону; "
+            "неподходящие Nginx правила остаются в статистике, но не считаются уязвимостью."
         ),
     }
     return publications, summary, findings
