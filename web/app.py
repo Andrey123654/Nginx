@@ -30,7 +30,7 @@ from web.sarif_report import generate_sarif_report
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:8080").rstrip("/")
 if urlsplit(PUBLIC_ORIGIN).scheme not in {"http", "https"} or not urlsplit(PUBLIC_ORIGIN).hostname:
     raise RuntimeError("PUBLIC_ORIGIN must be an absolute http(s) origin")
@@ -40,7 +40,7 @@ ALLOWED_EXTERNAL_REGISTRY_SUFFIXES = {".xlsx"}
 app = FastAPI(
     title="NGINX Scope",
     description="Аудит конфигураций Nginx и областей сетевой видимости",
-    version="1.6.0",
+    version="1.7.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -196,8 +196,9 @@ def analyze_config_bundle(config_text, source_name):
         bundle_summary = {
             "format": "labeled-multi-file",
             "sections": len(sections),
-            "http_sections": sum(1 for item in sections if item["context"] == "http"),
-            "stream_sections": sum(1 for item in sections if item["context"] == "stream"),
+            "http_sections": sum(1 for item in sections if item["context"] == "http" and item.get("active", True)),
+            "stream_sections": sum(1 for item in sections if item["context"] == "stream" and item.get("active", True)),
+            "inactive_sections_ignored": sum(1 for item in sections if not item.get("active", True)),
         }
     return config_findings, publications, corrected_config, applied_fixes, manual_actions, bundle_summary
 
@@ -332,7 +333,7 @@ async def analyze(
                 Path(external_registry.filename or "external-publications.xlsx").name[:160],
             )
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail="Ошибка реестра внешних публикаций: " + str(exc)) from exc
+            raise HTTPException(status_code=422, detail="Ошибка выгрузки Edge/DNAT: " + str(exc)) from exc
     sensors = []
     for text, expected_zone in ((external_text, "external"), (internal_text, "internal")):
         sensor = parse_json_payload(text, f"датчике {expected_zone}")
